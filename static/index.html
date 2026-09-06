@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>喵星图工厂 CatGalaxy Factory</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="bgstars"></div>
+
+<header class="top">
+  <div class="brand">
+    <span class="logo">✦</span>
+    <div>
+      <h1>喵星图工厂 <em>CatGalaxy Factory</em></h1>
+      <p class="tagline">上传名册 CSV + 照片 → 校验 → 注入星图 → 预览 → 打包可离线运行的专属星图</p>
+    </div>
+  </div>
+  <div class="topRight">
+    <a class="ghost" href="/api/template" download>⬇ 名册模板 CSV</a>
+    <span class="ver">v1.0.0</span>
+  </div>
+</header>
+
+<main>
+  <!-- 步骤条 -->
+  <ol class="steps" id="steps">
+    <li data-s="1" class="on"><b>1</b> 建项目</li>
+    <li data-s="2"><b>2</b> 传数据</li>
+    <li data-s="3"><b>3</b> 看校验</li>
+    <li data-s="4"><b>4</b> 生成预览</li>
+    <li data-s="5"><b>5</b> 打包下载</li>
+  </ol>
+
+  <div class="grid">
+    <!-- 左：操作面板 -->
+    <section class="col">
+      <div class="card" id="c1">
+        <h2><span class="no">1</span>创建项目 · 配置校名</h2>
+        <label>学校名称<input id="school" value="示例校" placeholder="如：中北大学"></label>
+        <label>副标题（可选）<input id="subtitle" placeholder="留空则自动生成"></label>
+        <div class="row">
+          <button class="primary" id="btnCreate">创建项目</button>
+          <select id="projList" title="已有项目"><option value="">— 打开已有项目 —</option></select>
+        </div>
+        <p class="hint" id="pidHint">尚未选择项目</p>
+      </div>
+
+      <div class="card" id="c2">
+        <h2><span class="no">2</span>导入数据（F1）</h2>
+        <label class="drop" id="dropRoster">
+          <input type="file" id="rosterFile" accept=".csv,text/csv" hidden>
+          <b>名册 CSV</b><span>12 列：编号,昵称,军衔,工位,毛色,特征描述,代表照片文件,照片数量,出没区域,关联照片编号,置信度,备注</span>
+          <i id="rosterState">未上传</i>
+        </label>
+        <label class="drop" id="dropPhotos">
+          <input type="file" id="photoFiles" accept="image/*,.zip" multiple hidden>
+          <b>猫咪照片</b><span>可多选图片，或直接拖一个 zip；自动压缩到长边≤1200px、单张≤200KB</span>
+          <i id="photoState">未上传</i>
+        </label>
+        <label class="drop" id="dropMap">
+          <input type="file" id="mapFile" accept="image/*" hidden>
+          <b>校园底图（可选）</b><span>不传则自动生成程序化星野底图</span>
+          <i id="mapState">未上传</i>
+        </label>
+        <div class="row">
+          <button id="btnValidate">运行校验（F2）</button>
+        </div>
+      </div>
+
+      <div class="card" id="c4">
+        <h2><span class="no">4</span>生成与预览（F3 · F4）</h2>
+        <div class="row">
+          <label class="radio"><input type="radio" name="form" value="relative" checked> 相对路径版 <small>HTML + assets，体积小</small></label>
+          <label class="radio"><input type="radio" name="form" value="inline"> 纯文本内嵌版 <small>base64 内嵌，双击即开</small></label>
+        </div>
+        <label class="check"><input type="checkbox" id="excludeLow"> 排除置信度「低」的行</label>
+        <div class="row">
+          <button class="primary" id="btnGenerate">生成星图</button>
+          <button id="btnPreview" disabled>在下方预览</button>
+        </div>
+        <div id="genInfo" class="geninfo"></div>
+      </div>
+
+      <div class="card" id="c5">
+        <h2><span class="no">5</span>打包下载（F5）</h2>
+        <div class="row">
+          <button class="primary" id="btnDownload" disabled>⬇ 下载 zip</button>
+          <button id="btnSummary">生成归并决策摘要（F7）</button>
+        </div>
+        <p class="hint" id="zipHint">命名规则：{校名}-校园猫咪星图-{日期}.zip</p>
+      </div>
+
+      <div class="card" id="c6">
+        <h2><span class="no">+</span>普查 batch 解析器（F6）</h2>
+        <label class="drop" id="dropCensus">
+          <input type="file" id="censusFile" accept=".txt,text/plain" hidden>
+          <b>普查 batch txt</b><span>格式：文件名 | 猫数 | 毛色 | 特征 | 场景 | 画质 | 正脸 | 人脸</span>
+          <i id="censusState">未上传</i>
+        </label>
+        <div class="row">
+          <button id="btnCensus">解析成名册草稿</button>
+          <button id="btnCensusCsv" disabled>⬇ 下载草稿 CSV</button>
+        </div>
+        <div id="censusOut" class="census"></div>
+      </div>
+    </section>
+
+    <!-- 右：报告 + 预览 -->
+    <section class="col wide">
+      <div class="card" id="c3">
+        <h2><span class="no">3</span>校验报告（F2）</h2>
+        <div id="report" class="report"><p class="empty">还没有校验结果。上传名册与照片后点「运行校验」。</p></div>
+      </div>
+
+      <div class="card grow">
+        <h2><span class="no">4</span>星图预览（F4）</h2>
+        <div class="frameWrap">
+          <iframe id="frame" title="星图预览" sandbox="allow-scripts allow-same-origin"></iframe>
+          <div class="frameEmpty" id="frameEmpty">生成后在此即时预览<br><small>拖拽平移 · 滚轮缩放 · 点星看档案</small></div>
+        </div>
+      </div>
+    </section>
+  </div>
+</main>
+
+<div id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
