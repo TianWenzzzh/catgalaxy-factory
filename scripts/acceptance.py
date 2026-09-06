@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from fastapi.testclient import TestClient  # noqa: E402
-from PIL import Image  # noqa: E402
+from PIL import Image, ImageDraw  # noqa: E402
 
 from app import config, csv_loader  # noqa: E402
 from app.main import app  # noqa: E402
@@ -254,6 +254,136 @@ def verify_calib(client: TestClient, ev: Evidence, pid: str, n_cats: int) -> Non
              f"人工 {back['stats']['manual']} 颗")
 
 
+def make_badge() -> bytes:
+    """一张带透明角的校徽样图：透明区必须在重编码后还在，否则深色星图上会出现白方块。"""
+    img = Image.new("RGBA", (600, 400), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.ellipse((40, 20, 560, 380), fill=(200, 160, 60, 255), outline=(255, 255, 255, 255))
+    d.text((250, 180), "CAT", fill=(20, 20, 40, 255))
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def verify_theme(client: TestClient, ev: Evidence, pid: str,
+                 forms: tuple[str, ...]) -> None:
+    """F11 · 主题化：配色/字体/署名/校徽要能存下来、烘焙进产物，非法值要挡在门外。"""
+    from app.theme import DEFAULT_PRESET, MAX_SIGNATURE, PRESETS
+
+    url = f"/api/projects/{pid}/theme"
+    opts = client.get("/api/theme/options").json()
+    ev.check("F11 主题选项菜单可用",
+             len(opts["presets"]) == len(PRESETS) and len(opts["fonts"]) >= 5
+             and len(opts["colors"]) >= 8,
+             f"{len(opts['presets'])} 套预设、{len(opts['fonts'])} 种字体栈、"
+             f"{len(opts['colors'])} 个可调颜色")
+
+    base = client.get(url).json()
+    ev.check("F11 初始主题为默认预设",
+             base["theme"]["preset"] == DEFAULT_PRESET and not base["theme"]["colors"]
+             and base["has_logo"] is False
+             and base["effective_colors"] == PRESETS[DEFAULT_PRESET].colors,
+             f"预设 {base['theme']['preset']}，生效色 {len(base['effective_colors'])} 项，"
+             f"自定义 0 项，校徽 无")
+
+    sig = "中北大学学生会 · 校园猫咪普查小组 <script>alert(1)</script>"
+    r = client.put(url, json={"preset": "dawn", "colors": {"accent": "#ff8800"},
+                              "title_font": "kai", "footer_signature": sig})
+    j = r.json()
+    eff = j["effective_colors"]
+    dawn = PRESETS["dawn"].colors
+    ev.check("F11 切换预设 + 单项自定义颜色",
+             r.status_code == 200 and eff["accent"] == "#ff8800"
+             and {k: v for k, v in eff.items() if k != "accent"}
+             == {k: v for k, v in dawn.items() if k != "accent"}
+             and j["theme"]["colors"] == {"accent": "#ff8800"},
+             f"预设 {j['theme']['preset']}，accent 覆盖为 {eff['accent']}，"
+             f"其余 {len(eff) - 1} 项仍取预设值（存的是覆盖项而非全量）")
+
+    bad = client.put(url, json={"preset": "neon",
+                                "colors": {"bg": "red();", "sky": "#ffffff"},
+                                "title_font": "Comic Sans",
+                                "footer_signature": "长" * (MAX_SIGNATURE + 40)}).json()
+    t = bad["theme"]
+    ev.check("F11 非法值被丢弃并逐条说明",
+             len(bad["rejected"]) >= 5 and t["preset"] == DEFAULT_PRESET
+             and t["colors"] == {} and t["title_font"] == "system"
+             and len(t["footer_signature"]) <= MAX_SIGNATURE,
+             f"拒收 {len(bad['rejected'])} 条：{'；'.join(bad['rejected'][:3])}…"
+             f"｜预设退回 {t['preset']}，字体退回 {t['title_font']}，"
+             f"署名截断到 {len(t['footer_signature'])} 字")
+
+    client.put(url, json={"preset": "dawn", "colors": {"accent": "#ff8800"},
+                          "title_font": "kai", "footer_signature": sig})
+
+    r = client.post(f"/api/projects/{pid}/logo",
+                    files={"file": ("badge.png", make_badge(), "image/png")})
+    j = r.json()
+    logo = client.get(f"/api/projects/{pid}/logo")
+    with Image.open(io.BytesIO(logo.content)) as im:
+        has_alpha = im.mode in ("RGBA", "LA") and im.getextrema()[-1][0] < 255
+    ev.check("F11 上传校徽（自动缩放转 PNG 并保留透明区）",
+             r.status_code == 200 and j["has_logo"] is True
+             and max(j["width"], j["height"]) <= config.MAX_LOGO_SIDE
+             and logo.status_code == 200 and has_alpha,
+             f"600×400 → {j['width']}×{j['height']}，{j['bytes'] // 1024}KB，"
+             f"透明区 {'保留' if has_alpha else '丢失'}")
+
+    r = client.post(f"/api/projects/{pid}/logo",
+                    files={"file": ("badge.svg", b"<svg onload=alert(1)></svg>",
+                                    "image/svg+xml")})
+    ev.check("F11 SVG 校徽被拒（产物要挂公众号，不收能带脚本的格式）",
+             r.status_code == 400 and "SVG" in r.json()["detail"],
+             f"HTTP {r.status_code}：{r.json().get('detail', '')[:60]}")
+
+    for form in forms:
+        r = client.post(f"/api/projects/{pid}/generate", json={"form": form})
+        if not ev.check(f"F11 带主题重新生成（{form}）",
+                        r.status_code == 200 and r.json()["theme"]["preset"] == "dawn",
+                        "" if r.status_code == 200 else r.text[:200]):
+            continue
+        d = r.json()
+        html = client.get(d["preview_url"]).text
+        want_logo = ('<img class="logo" src="data:image/png;base64,' if form == "inline"
+                     else '<img class="logo" src="assets/logo.png"')
+        ev.check(f"F11 配色与字体已烘焙进产物（{form}）",
+                 "--bg:#1a0d09" in html and "--gold:#ff8800" in html
+                 and '"Kaiti SC"' in html,
+                 "--bg 取预设晨曦橘 #1a0d09，--gold 取自定义 #ff8800，标题字体栈含 Kaiti SC")
+        ev.check(f"F11 署名以转义文本追加在出处之后（{form}）",
+                 "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+                 and "<script>alert(1)</script>" not in html
+                 and html.index("由「喵星图工厂 CatGalaxy Factory」自动生成")
+                 < html.index("&lt;script&gt;alert(1)"),
+                 f"署名 {len(d['theme']['signature'])} 字，标签已转义为纯文本，出处未被替换")
+        ev.check(f"F11 校徽已进产物（{form}）", want_logo in html,
+                 "base64 内嵌，单文件双击即开" if form == "inline"
+                 else "相对路径 assets/logo.png，随包一起拷")
+        zf = zipfile.ZipFile(io.BytesIO(client.get(
+            f"/api/projects/{pid}/download?form={form}").content))
+        names = zf.namelist()
+        if form == "relative":
+            ev.check("F11 zip 内带独立校徽文件",
+                     "assets/logo.png" in names,
+                     f"assets/logo.png（{len(zf.read('assets/logo.png')) // 1024}KB）")
+        else:
+            ev.check("F11 内嵌版 zip 里不留校徽文件",
+                     "assets/logo.png" not in names,
+                     "校徽已 base64 进 HTML，压缩包内无冗余文件")
+
+    client.delete(f"/api/projects/{pid}/logo")
+    client.delete(url)
+    back = client.get(url).json()
+    d = client.post(f"/api/projects/{pid}/generate", json={"form": "relative"}).json()
+    html = client.get(d["preview_url"]).text
+    ev.check("F11 恢复默认主题后产物回到旧版长相",
+             back["theme"]["preset"] == DEFAULT_PRESET and back["has_logo"] is False
+             and "由喵星图工厂按项目配置注入" not in html
+             and "<img class=\"logo\"" not in html
+             and "--bg:#1a0d09" not in html,
+             "预设回到默认、校徽已删，产物里不再多出主题 <style> 与徽章标签")
+
+
 def run_flow(client: TestClient, ev: Evidence, *, school: str, subtitle: str,
              roster_text: str, photos: list[tuple[str, bytes]], expect_cats: int,
              forms: tuple[str, ...] = ("relative", "inline")) -> str:
@@ -329,6 +459,7 @@ def run_flow(client: TestClient, ev: Evidence, *, school: str, subtitle: str,
         verify_zip_contents(ev, zf, cats, form)
 
     verify_calib(client, ev, pid, expect_cats)
+    verify_theme(client, ev, pid, forms)
 
     r = client.post(f"/api/projects/{pid}/summary")
     md = r.json().get("markdown", "")
