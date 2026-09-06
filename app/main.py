@@ -16,7 +16,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from fastapi.staticfiles import StaticFiles
 
 from . import census_parser, image_proc, injector, merge, packager, store, summary_writer
-from .config import IMAGE_EXTS, ROSTER_COLUMNS, WORKSPACE, ensure_dirs
+from .config import (IMAGE_EXTS, MAX_PHOTOS_PER_PROJECT, MAX_PHOTOS_PER_UPLOAD,
+                     MAX_UPLOAD_BYTES, ROSTER_COLUMNS, WORKSPACE, ensure_dirs)
 from .csv_loader import build_column_map, decode_bytes, empty_template, normalize_id, parse_roster
 from .image_proc import generate_default_map
 from .injector import build_photo_chunks, render_starmap
@@ -282,34 +283,90 @@ async def upload_photos(pid: str, files: list[UploadFile] = File(...)) -> dict:
     meta = _meta_or_404(pid)
     dirs = ensure_dirs(pid)
     saved: list[dict] = []
+    written: list[Path] = []
     skipped: list[str] = []
+    warnings: list[str] = []
     compressed_bytes = 0
     src_bytes = 0
 
+    existing = len(store.photo_files(pid))
+    room = MAX_PHOTOS_PER_PROJECT - existing
+    if room <= 0:
+        raise HTTPException(413, f"项目已有 {existing} 张照片，达到累计上限 "
+                                 f"{MAX_PHOTOS_PER_PROJECT} 张；请新建项目或先清理旧照片")
+
+    budget = image_proc.ZipBudget(max_files=min(MAX_PHOTOS_PER_UPLOAD, room))
+
+    def rollback_and_413(why: str):
+        """超限就把本次写入的照片全删掉——不留半截入库的项目。"""
+        for p in written:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        raise HTTPException(413, why)
+
     for f in files:
+        name = f.filename or ""
+        declared = getattr(f, "size", None)
+        if declared and declared > MAX_UPLOAD_BYTES:
+            rollback_and_413(f"「{name or '(无名)'}」体积 {declared // 1024 // 1024}MB，"
+                             f"超过单文件上限 {MAX_UPLOAD_BYTES // 1024 // 1024}MB")
+        if budget.stopped:
+            skipped.append(name or "(未处理：已超限额)")
+            continue
+
         data = await f.read()
         if not data:
-            skipped.append(f.filename or "(空文件)")
+            skipped.append(name or "(空文件)")
             continue
-        name = f.filename or ""
+        if len(data) > MAX_UPLOAD_BYTES:
+            rollback_and_413(f"「{name or '(无名)'}」体积 {len(data) // 1024 // 1024}MB，"
+                             f"超过单文件上限 {MAX_UPLOAD_BYTES // 1024 // 1024}MB")
+
         if image_proc.is_zip(data):
-            for path, info in image_proc.extract_photo_zip(data, dirs["photos"]):
+            got = image_proc.extract_photo_zip(data, dirs["photos"], budget=budget,
+                                               label=name or "zip")
+            for path, info in got:
+                written.append(path)
                 saved.append(info)
                 src_bytes += info["src_bytes"]
                 compressed_bytes += info["out_bytes"]
             continue
+
         if Path(name).suffix.lower() not in IMAGE_EXTS:
             skipped.append(name or "(无扩展名)")
             continue
-        _path, info = image_proc.process_and_save(data, dirs["photos"], name)
+        if not budget.charge_file():
+            break
+        try:
+            path, info = image_proc.process_and_save(data, dirs["photos"], name)
+        except Exception:
+            skipped.append(f"{name}（不是有效的图片文件，已跳过）")
+            budget.release_file()
+            continue
+        written.append(path)
         saved.append(info)
         src_bytes += info["src_bytes"]
         compressed_bytes += info["out_bytes"]
 
+    if budget.stopped:
+        rollback_and_413(budget.stop_reason)
+
+    if budget.corrupt:
+        head = ", ".join(Path(c).name for c in budget.corrupt[:6])
+        warnings.append(f"这些文件扩展名是图片但解不开，已跳过：{head}"
+                        + ("…" if len(budget.corrupt) > 6 else ""))
+    if budget.too_deep:
+        head = ", ".join(Path(z).name for z in budget.too_deep[:6])
+        warnings.append(f"这些嵌套 zip 超过 {budget.max_depth} 层递归上限，未展开：{head}"
+                        + ("…" if len(budget.too_deep) > 6 else ""))
+
     meta.photo_count = len(store.photo_files(pid))
     store.log(meta, "上传照片",
               f"张数={len(saved)} 跳过={len(skipped)} "
-              f"原始={src_bytes/1024:.0f}KB 压缩后={compressed_bytes/1024:.0f}KB")
+              f"原始={src_bytes/1024:.0f}KB 压缩后={compressed_bytes/1024:.0f}KB "
+              f"解压={budget.inflated/1024/1024:.1f}MB 嵌套zip={budget.nested_zips}")
 
     report = None
     if meta.has_roster:
@@ -319,6 +376,17 @@ async def upload_photos(pid: str, files: list[UploadFile] = File(...)) -> dict:
             "src_bytes": src_bytes, "out_bytes": compressed_bytes,
             "max_side": max((s["width"] for s in saved), default=0) and
                         max(max(s["width"], s["height"]) for s in saved) if saved else 0,
+            "limits": {"max_files_this_request": budget.max_files,
+                       "max_files_per_project": MAX_PHOTOS_PER_PROJECT,
+                       "max_upload_bytes": MAX_UPLOAD_BYTES,
+                       "max_inflated_bytes": budget.max_inflated,
+                       "max_zip_depth": budget.max_depth,
+                       "files_seen": budget.files,
+                       "inflated_bytes": budget.inflated,
+                       "zip_entries": budget.entries,
+                       "project_total": meta.photo_count,
+                       "project_room_left": MAX_PHOTOS_PER_PROJECT - meta.photo_count},
+            "warnings": warnings,
             "report": report.model_dump() if report else None}
 
 

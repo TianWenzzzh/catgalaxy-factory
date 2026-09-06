@@ -11,7 +11,9 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter
 
-from .config import (IMAGE_EXTS, MAX_MAP_SIDE, MAX_PHOTO_BYTES, MAX_PHOTO_SIDE)
+from .config import (IMAGE_EXTS, MAX_MAP_SIDE, MAX_PHOTO_BYTES, MAX_PHOTO_SIDE,
+                     MAX_PHOTOS_PER_UPLOAD, MAX_ZIP_DEPTH, MAX_ZIP_ENTRIES,
+                     MAX_ZIP_INFLATED_BYTES, ZIP_READ_CHUNK)
 
 _UNSAFE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
@@ -103,26 +105,160 @@ def process_and_save(data: bytes, dest_dir: Path, filename: str) -> tuple[Path, 
     return out_path, info
 
 
-def extract_photo_zip(data: bytes, dest_dir: Path) -> list[tuple[Path, dict]]:
-    """解包照片 zip（忽略目录项、__MACOSX、非图片），逐张压缩落盘。"""
+class ZipBudget:
+    """一次上传请求的解包预算。
+
+    超限不抛异常，而是记下 ``stop_reason`` 并停手——路由层据此回滚已写入的
+    文件并回 413，避免「解到一半炸了、项目里留半截照片」。
+    """
+
+    def __init__(self, max_files: int | None = None, max_inflated: int | None = None,
+                 max_entries: int | None = None, max_depth: int | None = None):
+        # 上限在这里才解析到模块常量，而不是写成默认参数值——默认值在函数定义
+        # 时就绑定了，测试没法把上限调小来触发限额分支。
+        self.max_files = MAX_PHOTOS_PER_UPLOAD if max_files is None else max_files
+        self.max_inflated = MAX_ZIP_INFLATED_BYTES if max_inflated is None else max_inflated
+        self.max_entries = MAX_ZIP_ENTRIES if max_entries is None else max_entries
+        self.max_depth = MAX_ZIP_DEPTH if max_depth is None else max_depth
+        self.files = 0
+        self.inflated = 0
+        self.entries = 0
+        self.nested_zips = 0
+        self.stop_reason = ""
+        self.corrupt: list[str] = []      # 扩展名是图片但解不开的
+        self.too_deep: list[str] = []     # 超过递归层数被放弃的嵌套 zip
+        self.bad_zips: list[str] = []     # 打不开的 zip
+
+    @property
+    def stopped(self) -> bool:
+        return bool(self.stop_reason)
+
+    def stop(self, why: str) -> None:
+        if not self.stop_reason:
+            self.stop_reason = why
+
+    def charge_file(self) -> bool:
+        """申请一个照片名额。满了就停手并返回 False，且不占用名额。"""
+        if self.files >= self.max_files:
+            self.stop(f"照片张数达到上限 {self.max_files} 张，已停手")
+            return False
+        self.files += 1
+        return True
+
+    def release_file(self) -> None:
+        """退回一个名额——照片解不开时不占额度。"""
+        self.files = max(0, self.files - 1)
+
+
+class _BadEntry(Exception):
+    """单个 zip 条目读不出来（CRC 不符 / 加密 / 压缩流损坏）——只跳过这一条。"""
+
+
+def _read_capped(zf: zipfile.ZipFile, info: zipfile.ZipInfo,
+                 budget: ZipBudget) -> bytes | None:
+    """流式解压并实时计数。返回 None 表示预算耗尽、调用方必须立刻停手。
+
+    不用 zf.read()：要边解边计数才能在超预算的第一时间收手，而不是等一个
+    几 GB 的条目全进了内存才发现。单个条目坏了抛 _BadEntry，由调用方跳过。
+    """
+    out = io.BytesIO()
+    try:
+        with zf.open(info) as fh:
+            while True:
+                chunk = fh.read(ZIP_READ_CHUNK)
+                if not chunk:
+                    break
+                out.write(chunk)
+                budget.inflated += len(chunk)
+                if budget.inflated > budget.max_inflated:
+                    budget.stop(f"解压后累计超过 {budget.max_inflated // 1024 // 1024}MB "
+                                f"上限（疑似 zip 炸弹），已停手")
+                    return None
+    except zipfile.BadZipFile:
+        # zipfile 按中心目录声明的 file_size 截断输出，谎报大小的条目会在
+        # CRC 校验处炸在这里——正好说明这个条目不可信，丢掉。
+        raise _BadEntry(info.filename) from None
+    except RuntimeError:
+        raise _BadEntry(info.filename) from None   # 加密 zip 需要密码
+    return out.getvalue()
+
+
+def _zip_name(info: zipfile.ZipInfo) -> str:
+    """zip 条目名。中文可能是 cp437 误编码，尝试按 gbk 还原。"""
+    if info.flag_bits & 0x800 == 0:
+        try:
+            return info.filename.encode("cp437").decode("gbk")
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            return info.filename
+    return info.filename
+
+
+def extract_photo_zip(data: bytes, dest_dir: Path, budget: ZipBudget | None = None,
+                      depth: int = 0, label: str = "") -> list[tuple[Path, dict]]:
+    """解包照片 zip（忽略目录项、__MACOSX、非图片），逐张压缩落盘。
+
+    嵌套 zip 会递归解包，最多 ``budget.max_depth`` 层。传入的 ``budget`` 会被
+    就地更新；不传则内部新建一个（此时调用方看不到限额状态）。
+    """
+    if budget is None:
+        budget = ZipBudget()
     results: list[tuple[Path, dict]] = []
-    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+    tag = label or "zip"
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except (zipfile.BadZipFile, ValueError):
+        budget.bad_zips.append(tag)
+        budget.stop(f"zip 打不开（文件损坏或不是标准 zip）：{tag}")
+        return results
+
+    with zf:
         for info in zf.infolist():
+            if budget.stopped:
+                break
             if info.is_dir():
                 continue
-            name = info.filename
-            # zip 里的中文可能是 cp437 误编码，尝试还原
-            if info.flag_bits & 0x800 == 0:
+            budget.entries += 1
+            if budget.entries > budget.max_entries:
+                budget.stop(f"zip 条目数超过上限 {budget.max_entries} 个，已停手")
+                break
+            name = _zip_name(info)
+            if "__MACOSX" in name or Path(name).name.startswith("."):
+                continue
+            suffix = Path(name).suffix.lower()
+
+            if suffix == ".zip":
+                if depth + 1 > budget.max_depth:
+                    budget.too_deep.append(name)
+                    continue
                 try:
-                    name = info.filename.encode("cp437").decode("gbk")
-                except (UnicodeDecodeError, UnicodeEncodeError):
-                    name = info.filename
-            if "__MACOSX" in name or name.startswith("."):
+                    nested = _read_capped(zf, info, budget)
+                except _BadEntry:
+                    budget.corrupt.append(name)
+                    continue
+                if nested is None:
+                    break
+                budget.nested_zips += 1
+                results += extract_photo_zip(nested, dest_dir, budget,
+                                             depth + 1, name)
                 continue
-            if Path(name).suffix.lower() not in IMAGE_EXTS:
+
+            if suffix not in IMAGE_EXTS:
                 continue
-            payload = zf.read(info)
-            results.append(process_and_save(payload, dest_dir, Path(name).name))
+
+            try:
+                payload = _read_capped(zf, info, budget)
+            except _BadEntry:
+                budget.corrupt.append(name)
+                continue
+            if payload is None:
+                break
+            if not budget.charge_file():
+                break
+            try:
+                results.append(process_and_save(payload, dest_dir, Path(name).name))
+            except Exception:
+                budget.release_file()
+                budget.corrupt.append(name)
     return results
 
 

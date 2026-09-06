@@ -56,9 +56,10 @@
         </label>
         <label class="drop" id="dropPhotos">
           <input type="file" id="photoFiles" accept="image/*,.zip" multiple hidden>
-          <b>猫咪照片</b><span>可多选图片，或直接拖一个 zip；自动压缩到长边≤1200px、单张≤200KB</span>
+          <b>猫咪照片</b><span>可多选图片，或直接拖一个 zip（zip 套 zip 也会递归展开，最多 3 层）；自动压缩到长边≤1200px、单张≤200KB；单次≤2000 张、单项目≤3000 张</span>
           <i id="photoState">未上传</i>
         </label>
+        <p class="hint" id="uploadNote" hidden></p>
         <label class="drop" id="dropMap">
           <input type="file" id="mapFile" accept="image/*" hidden>
           <b>校园底图（可选）</b><span>不传则自动生成程序化星野底图</span>

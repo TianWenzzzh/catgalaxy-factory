@@ -51,6 +51,7 @@ $("#btnCreate").addEventListener("click", async () => {
     $("#pidHint").textContent = `项目已创建：${meta.id}`;
     $("#rosterState").textContent = "未上传"; $("#rosterState").className = "";
     $("#photoState").textContent = "未上传"; $("#photoState").className = "";
+    $("#uploadNote").hidden = true; $("#uploadNote").textContent = "";
     $("#mapState").textContent = "自动生成"; $("#mapState").className = "";
     $("#report").innerHTML = '<p class="empty">还没有校验结果。上传名册与照片后点「运行校验」。</p>';
     state.report = null; state.generated = null;
@@ -141,15 +142,38 @@ bindDrop("#dropPhotos", "#photoFiles", "#photoState", async (files) => {
   const fd = new FormData();
   for (const f of files) fd.append("files", f);
   $("#photoState").textContent = `上传 ${files.length} 个…`;
+  $("#uploadNote").hidden = true;
   try {
     const r = await api(`/api/projects/${state.pid}/photos`, { method: "POST", body: fd });
     const kb = (r.out_bytes / 1024).toFixed(0);
     $("#photoState").textContent = `${r.photos.length} 张 · ${kb}KB`;
     $("#photoState").className = "ok";
-    if (r.skipped && r.skipped.length) toast(`已跳过 ${r.skipped.length} 个非图片文件`, "");
-    toast(`照片已压缩入库：${r.saved} 张（长边≤${r.max_side || 1200}px）`, "ok");
+
+    const lim = r.limits || {};
+    const notes = [];
+    if (r.skipped && r.skipped.length) notes.push(`已跳过 ${r.skipped.length} 个：${r.skipped.slice(0, 6).join("、")}${r.skipped.length > 6 ? " …" : ""}`);
+    (r.warnings || []).forEach((w) => notes.push(w));
+    if (lim.project_room_left !== undefined) {
+      notes.push(`本项目共 ${lim.project_total} 张照片，还能再传 ${lim.project_room_left} 张`
+                 + `（累计上限 ${lim.max_files_per_project}，单次上限 ${lim.max_files_this_request}）`);
+    }
+    if (notes.length) {
+      const n = $("#uploadNote");
+      n.textContent = notes.join(" ｜ ");
+      n.hidden = false;
+    }
+    toast(`照片已压缩入库：${r.saved} 张（长边≤${r.max_side || 1200}px，共 ${kb}KB）`,
+          notes.length ? "" : "ok");
     if (r.report) { state.report = r.report; renderReport(r.report); }
-  } catch (e) { $("#photoState").textContent = "失败"; $("#photoState").className = "err"; toast("上传失败：" + e.message, "err"); }
+  } catch (e) {
+    $("#photoState").textContent = "被拒";
+    $("#photoState").className = "err";
+    const n = $("#uploadNote");
+    n.textContent = `${e.message}。本次上传已整体回滚，项目里不会留下半截照片——`
+                  + `把 zip 拆小一点、或分几次传再试。`;
+    n.hidden = false;
+    toast("上传被拒：" + e.message, "err");
+  }
 });
 
 bindDrop("#dropMap", "#mapFile", "#mapState", async (files) => {
