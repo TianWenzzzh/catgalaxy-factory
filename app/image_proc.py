@@ -7,6 +7,7 @@ import os
 import random
 import re
 import zipfile
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter
@@ -93,17 +94,221 @@ def _fit_bytes(img: Image.Image, max_bytes: int) -> tuple[bytes | None, int]:
     return best, best_q
 
 
+def output_path(dest_dir: Path, filename: str) -> Path:
+    """统一输出名：去路径、一律 .jpg。单张与批量落盘共用这一条规则。"""
+    stem = Path(safe_filename(filename)).stem or "photo"
+    return Path(dest_dir) / f"{stem}.jpg"
+
+
 def process_and_save(data: bytes, dest_dir: Path, filename: str) -> tuple[Path, dict]:
     """压缩并写入目标目录，统一输出 .jpg。"""
     dest_dir.mkdir(parents=True, exist_ok=True)
-    name = safe_filename(filename)
-    stem = Path(name).stem or "photo"
-    out_path = dest_dir / f"{stem}.jpg"
+    out_path = output_path(dest_dir, filename)
     blob, info = compress_photo(data)
     atomic_write_bytes(out_path, blob)
     info["filename"] = out_path.name
     info["path"] = str(out_path)
     return out_path, info
+
+
+# ---------- 批量压缩：攒一批，用进程池并行压 ----------
+
+# 一批攥多少张原图。这是**内存**上限而不是性能旋钮：整批原图都在手里，
+# 手机原图能有 20MB 一张，批再大就会在学生机上换页。
+PARALLEL_BATCH = 16
+# 凑到几张才值得起进程池。实测（75 张真实照片、266.7MB）：全串行 16.5s，
+# 只让满批走并行、剩下的 11 张尾巴串行 → 10.5s，尾巴也并行 → 6.2s。
+# 尾巴往往有十来张，为它多起一次池稳赚，所以这个门槛压得很低。
+PARALLEL_MIN_ITEMS = 4
+# 工人上限。实测 12 张 4000×3000：串行 2.26s，2 工 1.46s，4 工 0.96s，
+# 6 工 0.86s，8 工 0.89s——4 工之后收益就平了，而每个工人解码一张大图要上百 MB，
+# 所以卡在 4：拿 2.3x 的加速，不把内存推到悬崖边。
+PARALLEL_WORKERS = 4
+
+
+def _worker_count(n: int) -> int:
+    return max(1, min(os.cpu_count() or 1, PARALLEL_WORKERS, n))
+
+
+def _compress_one(job: tuple[int, str, bytes]) -> tuple[int, str, bytes | None, dict | None]:
+    """子进程里的工人：只压缩，不落盘。
+
+    必须是模块级函数，ProcessPoolExecutor 靠 pickle 按引用传它。不落盘是为了把
+    写文件留在父进程：413 回滚、原子替换、结果顺序都还是单线程的事，子进程被杀
+    也只丢一张照片，不会在磁盘上留半截文件。
+
+    解不开的图返回 blob=None，和串行路径抛异常是同一个意思——调用方据此记
+    corrupt / skipped，而不是让一张坏图毁掉整批上传。
+    """
+    idx, name, data = job
+    try:
+        blob, info = compress_photo(data)
+    except Exception:
+        return idx, name, None, None
+    return idx, name, blob, info
+
+
+def _safe_notify(cb, *args) -> None:
+    """调进度回调，但绝不让它把真正的入库搞崩（见 ZipBudget._notify）。"""
+    if cb is None:
+        return
+    try:
+        cb(*args)
+    except Exception:
+        pass
+
+
+class PhotoBatcher:
+    """攒一批照片再压，够一批就并行。
+
+    一张一张地起停进程池，省下的时间全赔在 spawn 上；整包一次性喂进去又会把
+    几百 MB 原图全压在内存里。所以按 ``PARALLEL_BATCH`` 分批：批内并行，批间串行。
+
+    池是**整个 batcher 共用一个**（懒创建、close 时关）。实测 75 张真实照片：
+    每批新起一个池要 10.5s，四批共用一个池只要 6.2s——启动开销比压缩本身还显眼。
+    所以调用方要用 ``with`` 把它包住，别让工人进程活过这次上传。
+
+    不满 ``PARALLEL_MIN_ITEMS`` 张就走串行路径。除了不划算，还有个实际理由：
+    串行路径调的是模块级的 ``process_and_save``，测试可以替换它来模拟慢压缩；
+    子进程里的替换传不过去，小批量留在父进程，这类测试才还有意义。
+
+    结果按提交顺序返回，与完成顺序无关——并行完成是乱序的，而调用方（zip 解包、
+    上传路由）报给用户的名单必须和它上传的顺序对得上。
+    """
+
+    def __init__(self, dest_dir: Path, on_item=None,
+                 batch: int | None = None, workers: int | None = None,
+                 min_items: int | None = None):
+        self.dest_dir = Path(dest_dir)
+        self.on_item = on_item
+        # 和 ZipBudget 一个道理：上限在构造时才落到实例上，测试才能把它调小。
+        self.batch = PARALLEL_BATCH if batch is None else batch
+        self.min_items = PARALLEL_MIN_ITEMS if min_items is None else min_items
+        self.workers = workers
+        self.saved: list[tuple[Path, dict]] = []
+        self.failed: list[str] = []
+        self._pending: list[tuple[str, bytes]] = []
+        self._executor: ProcessPoolExecutor | None = None
+        self._pool_dead = False
+        self.parallel_batches = 0        # 真走了进程池的批数（测试和日志用）
+
+    # ---------- 收件 ----------
+
+    def add(self, name: str, data: bytes) -> None:
+        """收一张原图。攒满一批就地压掉，所以手里最多攥着一批的量。"""
+        self._pending.append((name, data))
+        if len(self._pending) >= self.batch:
+            self.flush()
+
+    def drop_pending(self) -> int:
+        """扔掉还没压的原图，返回扔了几张。
+
+        超限额要回滚时用：那些照片注定要被删掉，别再花几秒去压它们。
+        调用方要按返回的张数退回 budget 里的名额。
+        """
+        n = len(self._pending)
+        self._pending = []
+        return n
+
+    def take(self) -> tuple[list[tuple[Path, dict]], list[str]]:
+        """压掉剩下的，取走全部结果并清空——调用方要能分次收，不重复计数。"""
+        self.flush()
+        saved, failed = self.saved, self.failed
+        self.saved, self.failed = [], []
+        return saved, failed
+
+    # ---------- 压缩 ----------
+
+    def flush(self) -> None:
+        items, self._pending = self._pending, []
+        if not items:
+            return
+        self.dest_dir.mkdir(parents=True, exist_ok=True)
+        if len(items) >= self.min_items:
+            self._parallel(items)
+        else:
+            self._serial(items)
+
+    def _serial(self, items: list[tuple[str, bytes]]) -> None:
+        for name, data in items:
+            try:
+                self.saved.append(process_and_save(data, self.dest_dir, name))
+            except Exception:
+                self.failed.append(name)
+                continue
+            _safe_notify(self.on_item, name)
+
+    def _pool(self) -> ProcessPoolExecutor:
+        if self._pool_dead:
+            raise RuntimeError("进程池已经罢工，这一批退回串行")
+        if self._executor is None:
+            self._executor = ProcessPoolExecutor(
+                max_workers=self.workers or _worker_count(self.batch))
+        return self._executor
+
+    def _parallel(self, items: list[tuple[str, bytes]]) -> None:
+        got: dict[int, tuple[str, bytes | None, dict | None]] = {}
+        self.parallel_batches += 1
+        try:
+            pool = self._pool()
+            futs = [pool.submit(_compress_one, (i, name, data))
+                    for i, (name, data) in enumerate(items)]
+            for fut in as_completed(futs):
+                idx, name, blob, info = fut.result()
+                got[idx] = (name, blob, info)
+                if blob is not None:
+                    _safe_notify(self.on_item, name)
+        except Exception:
+            # 池起不来或中途死掉（Windows 上主模块没有 __main__ 保护、子进程被
+            # 杀、临时目录不可写……）：已经拿回的结果照用，缺的那几张退回串行。
+            # 并行是优化，不是新的失败面——不能因为进程池罢工就让用户整批照片白传。
+            # 也不再重试：环境不给起子进程，下一批同样起不来，白付一次 spawn。
+            self._pool_dead = True
+            self.close()
+        if len(got) < len(items):
+            if not got:
+                self.parallel_batches -= 1      # 一张都没压成，等于没用上池
+            rest = [(i, name, data) for i, (name, data) in enumerate(items)
+                    if i not in got]
+            for i, name, data in rest:
+                try:
+                    blob, info = compress_photo(data)
+                except Exception:
+                    blob, info = None, None
+                got[i] = (name, blob, info)
+                if blob is not None:
+                    _safe_notify(self.on_item, name)
+        for name, blob, info in (got[i] for i in range(len(items))):
+            if blob is None:
+                self.failed.append(name)
+                continue
+            out = output_path(self.dest_dir, name)
+            atomic_write_bytes(out, blob)
+            info["filename"] = out.name
+            info["path"] = str(out)
+            self.saved.append((out, info))
+
+    # ---------- 生命周期 ----------
+
+    def close(self) -> None:
+        """关掉进程池。幂等，任何路径上都可以重复调。
+
+        wait=False：落盘全在父进程，子进程手里只有算完的字节，不必等它们收尾；
+        真要收尸，ProcessPoolExecutor 自己注册了 atexit。
+        """
+        ex, self._executor = self._executor, None
+        if ex is not None:
+            try:
+                ex.shutdown(wait=False)
+            except Exception:
+                pass
+
+    def __enter__(self) -> "PhotoBatcher":
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
+        # 返回 None：不吞异常，413 该回什么状态码还回什么
 
 
 def _open_rgba(data: bytes) -> Image.Image:
@@ -184,12 +389,7 @@ class ZipBudget:
         进度是「参考信息」：写 progress.json 撞上磁盘满或权限问题，该失败的
         是进度条，不是用户那 76 张照片的入库。
         """
-        if cb is None:
-            return
-        try:
-            cb(*args)
-        except Exception:
-            pass
+        _safe_notify(cb, *args)
 
     @property
     def stopped(self) -> bool:
@@ -256,11 +456,17 @@ def _zip_name(info: zipfile.ZipInfo) -> str:
 
 
 def extract_photo_zip(data: bytes, dest_dir: Path, budget: ZipBudget | None = None,
-                      depth: int = 0, label: str = "") -> list[tuple[Path, dict]]:
+                      depth: int = 0, label: str = "",
+                      batcher: PhotoBatcher | None = None) -> list[tuple[Path, dict]]:
     """解包照片 zip（忽略目录项、__MACOSX、非图片），逐张压缩落盘。
 
     嵌套 zip 会递归解包，最多 ``budget.max_depth`` 层。传入的 ``budget`` 会被
     就地更新；不传则内部新建一个（此时调用方看不到限额状态）。
+
+    ``batcher`` 可选：给了它，照片就不在这里逐张压，而是攒批交给它并行压
+    （见 PhotoBatcher）。递归各层共用同一个 batcher，所以 zip 套 zip 也只会
+    起一个进程池。顶层调用返回前会把 batcher 排空，因此不管走哪条路，调用方
+    拿到的都是同一份按解包顺序排好的结果清单。
     """
     if budget is None:
         budget = ZipBudget()
@@ -306,7 +512,7 @@ def extract_photo_zip(data: bytes, dest_dir: Path, budget: ZipBudget | None = No
                     break
                 budget.nested_zips += 1
                 results += extract_photo_zip(nested, dest_dir, budget,
-                                             depth + 1, name)
+                                             depth + 1, name, batcher)
                 continue
 
             if suffix not in IMAGE_EXTS:
@@ -321,6 +527,9 @@ def extract_photo_zip(data: bytes, dest_dir: Path, budget: ZipBudget | None = No
                 break
             if not budget.charge_file():
                 break
+            if batcher is not None:
+                batcher.add(Path(name).name, payload)
+                continue
             try:
                 results.append(process_and_save(payload, dest_dir, Path(name).name))
             except Exception:
@@ -328,6 +537,18 @@ def extract_photo_zip(data: bytes, dest_dir: Path, budget: ZipBudget | None = No
                 budget.corrupt.append(name)
             else:
                 ZipBudget._notify(budget.on_item, Path(name).name)
+
+    if batcher is not None and depth == 0:
+        if budget.stopped:
+            # 已经停手（超限额、zip 炸弹），这些照片注定要被路由层回滚删掉，
+            # 别再花几秒去压它们；名额照退，免得 files_seen 虚高。
+            for _ in range(batcher.drop_pending()):
+                budget.release_file()
+        drained, failed = batcher.take()
+        results += drained
+        for name in failed:
+            budget.release_file()
+            budget.corrupt.append(name)
     return results
 
 

@@ -439,13 +439,20 @@ def test_progress_route_carries_no_guard(client, pid):
         pytest.fail("找不到 /api/projects/{pid}/progress 路由")
 
 
-def test_progress_is_answered_while_photos_are_being_ingested(client, pid, monkeypatch):
+@pytest.mark.parametrize("parallel", [False, True])
+def test_progress_is_answered_while_photos_are_being_ingested(
+        client, pid, monkeypatch, parallel):
     """光「不挂锁」还不够：照片入库这条路由是 async 的，而解压 / Pillow 压缩 /
     落盘全是同步活。直接调用会把事件循环整个占住，同一时间 /progress 一个请求
     都答不上来——浏览器实测 60 张的 zip 让进度条哑了 6.6 秒，第二段（恰恰是
     进度条唯一存在的理由）从头到尾没显示过。
 
-    这里让 process_and_save 同步 sleep 0.05 秒来把耗时放大到确定可测，
+    压缩有两条路，两条都得测：
+      · 串行——把 process_and_save 换成 sleep 0.05 秒来放大耗时。这条路必须
+        显式把 PARALLEL_MIN_ITEMS 抬到天上，否则 12 张会走并行，而子进程看不见
+        父进程的替换，测试就会「因为错误的原因而通过」。
+      · 并行——真起进程池。慢是天然的（spawn + 八张大图），不需要也不能替换函数。
+
     再用两条并发协线（一条上传、一条轮询）看轮询到底能不能穿过去。
     """
     import asyncio
@@ -454,14 +461,20 @@ def test_progress_is_answered_while_photos_are_being_ingested(client, pid, monke
 
     from app import image_proc
 
-    real = image_proc.process_and_save
+    if parallel:
+        monkeypatch.setattr(image_proc, "PARALLEL_BATCH", 4)
+        monkeypatch.setattr(image_proc, "PARALLEL_MIN_ITEMS", 4)
+        blob = _zip({f"c{i}.jpg": make_jpeg(900, 700) for i in range(8)})
+    else:
+        monkeypatch.setattr(image_proc, "PARALLEL_MIN_ITEMS", 10 ** 9)
+        real = image_proc.process_and_save
 
-    def slow(*a, **k):
-        time.sleep(0.05)        # 同步 sleep 会占住事件循环，正好模拟压缩耗时
-        return real(*a, **k)
+        def slow(*a, **k):
+            time.sleep(0.05)    # 同步 sleep 会占住事件循环，正好模拟压缩耗时
+            return real(*a, **k)
 
-    monkeypatch.setattr(image_proc, "process_and_save", slow)
-    blob = _zip({f"c{i}.jpg": make_jpeg(60, 50) for i in range(12)})
+        monkeypatch.setattr(image_proc, "process_and_save", slow)
+        blob = _zip({f"c{i}.jpg": make_jpeg(60, 50) for i in range(12)})
 
     async def scenario() -> tuple[int, httpx.Response]:
         transport = httpx.ASGITransport(app=app)
@@ -480,7 +493,7 @@ def test_progress_is_answered_while_photos_are_being_ingested(client, pid, monke
 
     running, res = asyncio.run(scenario())
     assert res.status_code == 200, res.text
-    assert res.json()["saved"] == 12, res.text
+    assert res.json()["saved"] == (8 if parallel else 12), res.text
     assert running >= 2, (
-        f"入库的 0.6 秒里只有 {running} 次轮询读到 running——事件循环被同步活占住了，"
+        f"入库期间只有 {running} 次轮询读到 running——事件循环被同步活占住了，"
         f"进度条在这期间是哑的。检查 _ingest_photos 是否漏了 await run_in_threadpool。")

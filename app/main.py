@@ -364,20 +364,30 @@ async def upload_photos(pid: str, files: list[UploadFile] = File(...)) -> dict:
     进度条就白做了。
     """
     _meta_or_404(pid)
+    dirs = ensure_dirs(pid)
     with progress.Reporter(pid, "上传并压缩照片", total=len(files)) as rep:
-        return await _ingest_photos(pid, files, rep)
+        # 压缩按批并行（见 image_proc.PhotoBatcher），池是懒创建、整个请求共用一个。
+        # 生命周期放在这一层，和 Reporter 同一个道理：中途 413 回滚、Pillow 抛错，
+        # 都得有人把工人进程关掉，不能让它活过这次上传。
+        # zip 里的照片和散着传的照片分开记账：前者的失败要进 budget.corrupt（报成
+        # 「扩展名是图片但解不开」），后者的失败要进 skipped（报成「不是有效的图片
+        # 文件」）——两条文案是给用户看的，混在一起就分不清是哪个文件出的问题。
+        packed = image_proc.PhotoBatcher(dirs["photos"], on_item=rep.as_callback())
+        loose = image_proc.PhotoBatcher(dirs["photos"], on_item=rep.as_callback())
+        with packed, loose:
+            return await _ingest_photos(pid, files, rep, packed, loose)
 
 
 async def _ingest_photos(pid: str, files: list[UploadFile],
-                         rep: progress.Reporter) -> dict:
+                         rep: progress.Reporter,
+                         packed: image_proc.PhotoBatcher,
+                         loose: image_proc.PhotoBatcher) -> dict:
     meta = _meta_or_404(pid)
     dirs = ensure_dirs(pid)
     saved: list[dict] = []
     written: list[Path] = []
     skipped: list[str] = []
     warnings: list[str] = []
-    compressed_bytes = 0
-    src_bytes = 0
 
     existing = len(store.photo_files(pid))
     room = MAX_PHOTOS_PER_PROJECT - existing
@@ -388,8 +398,21 @@ async def _ingest_photos(pid: str, files: list[UploadFile],
     budget = image_proc.ZipBudget(max_files=min(MAX_PHOTOS_PER_UPLOAD, room),
                                   on_item=rep.as_callback(), on_total=rep.grow_total)
 
+    def collect(got: list[tuple[Path, dict]]) -> None:
+        for path, info in got:
+            written.append(path)
+            saved.append(info)
+
     def rollback_and_413(why: str):
-        """超限就把本次写入的照片全删掉——不留半截入库的项目。"""
+        """超限就把本次写入的照片全删掉——不留半截入库的项目。
+
+        先排空 batcher：并行压缩是按批落盘的，它手里可能已经写好了一批，也可能
+        还攥着一批原图没压。后者直接丢掉，别为一个注定要回滚的请求再花几秒压缩。
+        """
+        packed.drop_pending()
+        loose.drop_pending()
+        collect(packed.take()[0])
+        collect(loose.take()[0])
         for p in written:
             try:
                 p.unlink()
@@ -422,12 +445,8 @@ async def _ingest_photos(pid: str, files: list[UploadFile],
             # 在它唯一有意义的那段时间里是哑的（实测 60 张的包哑了 6.6 秒）。
             got = await run_in_threadpool(
                 image_proc.extract_photo_zip, data, dirs["photos"],
-                budget=budget, label=name or "zip")
-            for path, info in got:
-                written.append(path)
-                saved.append(info)
-                src_bytes += info["src_bytes"]
-                compressed_bytes += info["out_bytes"]
+                budget=budget, label=name or "zip", batcher=packed)
+            collect(got)
             continue
 
         if Path(name).suffix.lower() not in IMAGE_EXTS:
@@ -435,21 +454,27 @@ async def _ingest_photos(pid: str, files: list[UploadFile],
             continue
         if not budget.charge_file():
             break
-        try:
-            path, info = await run_in_threadpool(
-                image_proc.process_and_save, data, dirs["photos"], name)
-        except Exception:
-            skipped.append(f"{name}（不是有效的图片文件，已跳过）")
-            budget.release_file()
-            continue
-        written.append(path)
-        saved.append(info)
-        src_bytes += info["src_bytes"]
-        compressed_bytes += info["out_bytes"]
-        rep.bump(name)
+        # 同样必须在工作线程里：攒批、压缩、落盘都是同步活。
+        await run_in_threadpool(loose.add, name, data)
+
+    got, bad = await run_in_threadpool(loose.take)
+    collect(got)
+    for name in bad:
+        budget.release_file()
+        skipped.append(f"{name}（不是有效的图片文件，已跳过）")
+    # zip 那一路的结果在 extract_photo_zip 顶层就排空了；这里兜底扫一次，
+    # 免得哪天 zip 打不开提前 return 时把照片留在 batcher 里没人收。
+    got, bad = await run_in_threadpool(packed.take)
+    collect(got)
+    for name in bad:
+        budget.release_file()
+        budget.corrupt.append(name)
 
     if budget.stopped:
         rollback_and_413(budget.stop_reason)
+
+    src_bytes = sum(s["src_bytes"] for s in saved)
+    compressed_bytes = sum(s["out_bytes"] for s in saved)
 
     if budget.corrupt:
         head = ", ".join(Path(c).name for c in budget.corrupt[:6])
@@ -464,7 +489,8 @@ async def _ingest_photos(pid: str, files: list[UploadFile],
     store.log(meta, "上传照片",
               f"张数={len(saved)} 跳过={len(skipped)} "
               f"原始={src_bytes/1024:.0f}KB 压缩后={compressed_bytes/1024:.0f}KB "
-              f"解压={budget.inflated/1024/1024:.1f}MB 嵌套zip={budget.nested_zips}")
+              f"解压={budget.inflated/1024/1024:.1f}MB 嵌套zip={budget.nested_zips} "
+              f"并行批={packed.parallel_batches + loose.parallel_batches}")
 
     report = None
     if meta.has_roster:
