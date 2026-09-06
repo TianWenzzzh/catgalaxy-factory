@@ -8,6 +8,8 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
+from .config import atomic_replace, atomic_write_bytes, atomic_write_text, tmp_sibling
+
 _UNSAFE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
 
@@ -23,11 +25,12 @@ def html_basename(school: str) -> str:
 
 
 def _write(path: Path, content) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    """原子写。产物目录会在生成过程中被 rmtree 重建，
+    这时候如果有人正在点预览/下载，非原子的写法会让他拿到半截文件。"""
     if isinstance(content, bytes):
-        path.write_bytes(content)
+        atomic_write_bytes(path, content)
     else:
-        path.write_text(content, encoding="utf-8", newline="\n")
+        atomic_write_text(path, content, newline="\n")
 
 
 def build_relative_bundle(dest: Path, *, html: str, html_name: str,
@@ -95,14 +98,22 @@ def build_inline_bundle(dest: Path, *, html: str, html_name: str,
 
 
 def make_zip(src_dir: Path, zip_path: Path) -> Path:
-    """把目录压成 zip（zip 内不带顶层目录，解压即用）。"""
+    """把目录压成 zip（zip 内不带顶层目录，解压即用）。
+
+    压到临时文件再原子替换。旧写法是「unlink 目标 → 流式写」，几十 MB 的包
+    要写好几秒，这期间点下载的人会拿到半截 zip（解压报错）或者直接 404。
+    """
     zip_path.parent.mkdir(parents=True, exist_ok=True)
-    if zip_path.exists():
-        zip_path.unlink()
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-        for p in sorted(src_dir.rglob("*")):
-            if p.is_file():
-                zf.write(p, p.relative_to(src_dir).as_posix())
+    tmp = tmp_sibling(zip_path)
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            for p in sorted(src_dir.rglob("*")):
+                if p.is_file():
+                    zf.write(p, p.relative_to(src_dir).as_posix())
+        atomic_replace(tmp, zip_path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     return zip_path
 
 

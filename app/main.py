@@ -10,14 +10,16 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import census_parser, image_proc, injector, merge, packager, store, summary_writer
+from . import (census_parser, image_proc, injector, locking, merge, packager, store,
+               summary_writer)
 from .config import (IMAGE_EXTS, MAX_PHOTOS_PER_PROJECT, MAX_PHOTOS_PER_UPLOAD,
-                     MAX_UPLOAD_BYTES, ROSTER_COLUMNS, WORKSPACE, ensure_dirs)
+                     MAX_UPLOAD_BYTES, ROSTER_COLUMNS, WORKSPACE, atomic_write_bytes,
+                     atomic_write_text, ensure_dirs, retry_read_bytes, retry_read_text)
 from .csv_loader import build_column_map, decode_bytes, empty_template, normalize_id, parse_roster
 from .image_proc import generate_default_map
 from .injector import build_photo_chunks, render_starmap
@@ -35,6 +37,12 @@ WORKSPACE.mkdir(parents=True, exist_ok=True)
 
 # ---------- 内部工具 ----------
 
+# 所有写路由都挂这把锁：同一项目的并发写被串行化，不同项目互不影响。
+# 读路由不挂——状态文件已改成原子替换，读者只会看到完整的旧版或完整的新版，
+# 没必要跟正在跑的生成/上传抢锁。
+_GUARD = Depends(locking.project_guard)
+
+
 def _meta_or_404(pid: str) -> ProjectMeta:
     meta = store.load_meta(pid)
     if not meta:
@@ -47,25 +55,26 @@ def _report_path(pid: str) -> Path:
 
 
 def _load_report(pid: str) -> Optional[ValidationReport]:
-    p = _report_path(pid)
-    if not p.exists():
+    try:
+        text = retry_read_text(_report_path(pid))
+    except FileNotFoundError:
         return None
     try:
-        return ValidationReport.model_validate(json.loads(p.read_text(encoding="utf-8")))
+        return ValidationReport.model_validate(json.loads(text))
     except Exception:
         return None
 
 
 def _save_report(pid: str, report: ValidationReport) -> None:
-    _report_path(pid).write_text(
-        json.dumps(report.model_dump(), ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(
+        _report_path(pid), json.dumps(report.model_dump(), ensure_ascii=False, indent=2))
 
 
 def _run_validation(meta: ProjectMeta) -> ValidationReport:
     roster = store.project_dir(meta.id) / "roster.csv"
     if not roster.exists():
         raise HTTPException(400, "尚未上传名册 CSV")
-    text, _enc = decode_bytes(roster.read_bytes())
+    text, _enc = decode_bytes(retry_read_bytes(roster))
     rows, missing, unknown, _header = parse_roster(text)
     report = validate(rows, store.photo_names(meta.id), missing_columns=missing,
                       unknown_columns=unknown, school=meta.school, project_id=meta.id)
@@ -121,7 +130,7 @@ def _photo_blobs(pid: str, names: Optional[set[str]] = None) -> dict[str, bytes]
     out: dict[str, bytes] = {}
     for p in store.photo_files(pid):
         if names is None or p.name in names or p.name.lower() in {n.lower() for n in names}:
-            out[p.name] = p.read_bytes()
+            out[p.name] = retry_read_bytes(p)
     return out
 
 
@@ -149,7 +158,7 @@ def generate_bundle(pid: str, form: str = "relative", *,
 
     dirs = ensure_dirs(pid)
     _ensure_map(pid)
-    map_bytes = store.map_path(pid).read_bytes()
+    map_bytes = retry_read_bytes(store.map_path(pid))
     map_size = _map_size(pid)
     calib_override = _calib_positions(pid)
     html_name = packager.html_basename(meta.school)
@@ -159,14 +168,14 @@ def generate_bundle(pid: str, form: str = "relative", *,
     referenced = {r.photo_file.strip().replace("\\", "/").split("/")[-1]
                   for r in rows if r.photo_file.strip()}
     photos = _photo_blobs(pid, referenced)
-    roster_csv = (store.project_dir(pid) / "roster.csv").read_text(encoding="utf-8",
-                                                                  errors="replace")
+    roster_csv = retry_read_bytes(
+        store.project_dir(pid) / "roster.csv").decode("utf-8", errors="replace")
     md = report_markdown(report)
-    (dirs["root"] / "校验报告.md").write_text(md, encoding="utf-8")
+    atomic_write_text(dirs["root"] / "校验报告.md", md)
     stats = injector.generation_stats(rows)
     summary_md = summary_writer.build_summary(meta, report, stats,
                                              merge=store.load_merge(pid))
-    (dirs["root"] / "归并决策摘要.md").write_text(summary_md, encoding="utf-8")
+    atomic_write_text(dirs["root"] / "归并决策摘要.md", summary_md)
 
     if form == "inline":
         payload = dict(photos)
@@ -262,7 +271,7 @@ def get_project(pid: str) -> dict:
     }
 
 
-@app.delete("/api/projects/{pid}")
+@app.delete("/api/projects/{pid}", dependencies=[_GUARD])
 def delete_project(pid: str) -> dict:
     _meta_or_404(pid)
     shutil.rmtree(store.project_dir(pid), ignore_errors=True)
@@ -271,7 +280,7 @@ def delete_project(pid: str) -> dict:
 
 # ---------- 路由：F1 数据导入 ----------
 
-@app.post("/api/projects/{pid}/roster")
+@app.post("/api/projects/{pid}/roster", dependencies=[_GUARD])
 async def upload_roster(pid: str, file: UploadFile = File(...)) -> dict:
     meta = _meta_or_404(pid)
     data = await file.read()
@@ -280,8 +289,8 @@ async def upload_roster(pid: str, file: UploadFile = File(...)) -> dict:
     text, enc = decode_bytes(data)
     rows, missing, unknown, header = parse_roster(text)
     dirs = ensure_dirs(pid)
-    (dirs["root"] / "roster.csv").write_bytes(data)
-    (dirs["data"] / "猫咪名册.csv").write_bytes(data)
+    atomic_write_bytes(dirs["root"] / "roster.csv", data)
+    atomic_write_bytes(dirs["data"] / "猫咪名册.csv", data)
     meta.has_roster = True
     store.log(meta, "上传名册", f"编码={enc} 行数={len(rows)} 缺列={missing or '无'}")
 
@@ -292,7 +301,7 @@ async def upload_roster(pid: str, file: UploadFile = File(...)) -> dict:
             "unknown_columns": unknown, "report": report.model_dump()}
 
 
-@app.post("/api/projects/{pid}/photos")
+@app.post("/api/projects/{pid}/photos", dependencies=[_GUARD])
 async def upload_photos(pid: str, files: list[UploadFile] = File(...)) -> dict:
     meta = _meta_or_404(pid)
     dirs = ensure_dirs(pid)
@@ -404,7 +413,7 @@ async def upload_photos(pid: str, files: list[UploadFile] = File(...)) -> dict:
             "report": report.model_dump() if report else None}
 
 
-@app.post("/api/projects/{pid}/map")
+@app.post("/api/projects/{pid}/map", dependencies=[_GUARD])
 async def upload_map(pid: str, file: UploadFile = File(...)) -> dict:
     meta = _meta_or_404(pid)
     data = await file.read()
@@ -427,7 +436,7 @@ async def upload_map(pid: str, file: UploadFile = File(...)) -> dict:
 
 # ---------- 路由：F2 校验 ----------
 
-@app.post("/api/projects/{pid}/validate")
+@app.post("/api/projects/{pid}/validate", dependencies=[_GUARD])
 def run_validate(pid: str) -> dict:
     meta = _meta_or_404(pid)
     report = _run_validation(meta)
@@ -448,7 +457,7 @@ def report_md(pid: str) -> PlainTextResponse:
 
 # ---------- 路由：F3/F4/F5 生成 · 预览 · 打包 ----------
 
-@app.post("/api/projects/{pid}/generate")
+@app.post("/api/projects/{pid}/generate", dependencies=[_GUARD])
 def generate(pid: str, req: GenerateRequest) -> dict:
     return generate_bundle(pid, req.form, exclude_low_confidence=req.exclude_low_confidence,
                            school=req.school)
@@ -516,7 +525,7 @@ def get_calib(pid: str) -> dict:
     }
 
 
-@app.put("/api/projects/{pid}/calib")
+@app.put("/api/projects/{pid}/calib", dependencies=[_GUARD])
 def put_calib(pid: str, req: CalibUpdateRequest) -> dict:
     """保存人工标定。坐标为相对底图左上角的归一化值（0~1）。"""
     meta = _meta_or_404(pid)
@@ -547,7 +556,7 @@ def put_calib(pid: str, req: CalibUpdateRequest) -> dict:
             "stats": injector.calib_stats(report.rows, merged)}
 
 
-@app.delete("/api/projects/{pid}/calib")
+@app.delete("/api/projects/{pid}/calib", dependencies=[_GUARD])
 def delete_calib(pid: str) -> dict:
     meta = _meta_or_404(pid)
     removed = store.clear_calib(pid)
@@ -587,7 +596,7 @@ def get_merge(pid: str) -> dict:
     }
 
 
-@app.put("/api/projects/{pid}/merge")
+@app.put("/api/projects/{pid}/merge", dependencies=[_GUARD])
 def put_merge(pid: str, req: MergeDecisionRequest) -> dict:
     """落一条人工判定。理由会进操作日志，最终出现在 F7 归并决策摘要里。"""
     meta = _meta_or_404(pid)
@@ -616,7 +625,7 @@ def put_merge(pid: str, req: MergeDecisionRequest) -> dict:
             "stats": {"groups": len(groups), "decided": len(book.decisions)}}
 
 
-@app.delete("/api/projects/{pid}/merge/{gid}")
+@app.delete("/api/projects/{pid}/merge/{gid}", dependencies=[_GUARD])
 def delete_merge(pid: str, gid: str) -> dict:
     meta = _meta_or_404(pid)
     removed = store.drop_merge(pid, gid)
@@ -634,7 +643,7 @@ def get_roster(pid: str) -> dict:
     p = store.project_dir(pid) / "roster.csv"
     if not p.exists():
         raise HTTPException(404, "尚未上传名册 CSV")
-    text, enc = decode_bytes(p.read_bytes())
+    text, enc = decode_bytes(retry_read_bytes(p))
     raw = [r for r in csv.reader(io.StringIO(text))]
     header = raw[0] if raw else []
     mapping, missing, unknown = build_column_map(header)
@@ -646,7 +655,7 @@ def get_roster(pid: str) -> dict:
             "report": report.model_dump() if report else None}
 
 
-@app.patch("/api/projects/{pid}/roster")
+@app.patch("/api/projects/{pid}/roster", dependencies=[_GUARD])
 def patch_roster(pid: str, req: RosterPatch) -> dict:
     """按「物理行号 + 标准列名」改单元格，回写 CSV 并自动重跑校验。"""
     meta = _meta_or_404(pid)
@@ -656,7 +665,7 @@ def patch_roster(pid: str, req: RosterPatch) -> dict:
     if not req.edits:
         raise HTTPException(400, "没有要应用的改动")
 
-    text, _enc = decode_bytes(p.read_bytes())
+    text, _enc = decode_bytes(retry_read_bytes(p))
     raw = [r for r in csv.reader(io.StringIO(text))]
     if not raw:
         raise HTTPException(400, "名册为空，无从修改")
@@ -686,8 +695,8 @@ def patch_roster(pid: str, req: RosterPatch) -> dict:
         buf = io.StringIO()
         csv.writer(buf, lineterminator="\n").writerows(raw)
         data = buf.getvalue().encode("utf-8-sig")
-        p.write_bytes(data)
-        (store.project_dir(pid) / "data" / "猫咪名册.csv").write_bytes(data)
+        atomic_write_bytes(p, data)
+        atomic_write_bytes(store.project_dir(pid) / "data" / "猫咪名册.csv", data)
         store.log(meta, "在线编辑名册",
                   f"改动 {len(applied)} 处，拒绝 {len(rejected)} 处："
                   + "；".join(f"行{a['line']}·{a['field']}" for a in applied[:6]))
@@ -720,7 +729,7 @@ async def census_parse(file: UploadFile = File(...), as_csv: bool = Form(False))
     })
 
 
-@app.post("/api/projects/{pid}/summary")
+@app.post("/api/projects/{pid}/summary", dependencies=[_GUARD])
 def summary(pid: str) -> dict:
     meta = _meta_or_404(pid)
     report = _load_report(pid)
@@ -728,7 +737,7 @@ def summary(pid: str) -> dict:
     stats = injector.generation_stats(rows) if rows else None
     md = summary_writer.build_summary(meta, report, stats, merge=store.load_merge(pid))
     out = store.project_dir(pid) / "归并决策摘要.md"
-    out.write_text(md, encoding="utf-8")
+    atomic_write_text(out, md)
     store.log(meta, "生成归并决策摘要", f"{len(md)} 字符")
     return {"markdown": md, "path": str(out)}
 

@@ -13,7 +13,7 @@ from PIL import Image, ImageDraw, ImageFilter
 
 from .config import (IMAGE_EXTS, MAX_MAP_SIDE, MAX_PHOTO_BYTES, MAX_PHOTO_SIDE,
                      MAX_PHOTOS_PER_UPLOAD, MAX_ZIP_DEPTH, MAX_ZIP_ENTRIES,
-                     MAX_ZIP_INFLATED_BYTES, ZIP_READ_CHUNK)
+                     MAX_ZIP_INFLATED_BYTES, ZIP_READ_CHUNK, atomic_write_bytes)
 
 _UNSAFE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
@@ -99,7 +99,7 @@ def process_and_save(data: bytes, dest_dir: Path, filename: str) -> tuple[Path, 
     stem = Path(name).stem or "photo"
     out_path = dest_dir / f"{stem}.jpg"
     blob, info = compress_photo(data)
-    out_path.write_bytes(blob)
+    atomic_write_bytes(out_path, blob)
     info["filename"] = out_path.name
     info["path"] = str(out_path)
     return out_path, info
@@ -313,8 +313,9 @@ def generate_default_map(dest: Path, width: int = MAX_MAP_SIDE,
     for gy in range(0, height, height // 8):
         d.line([(0, gy), (width, gy)], fill=(28, 40, 74), width=1)
 
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    img.save(dest, "JPEG", quality=86, optimize=True)
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=86, optimize=True)
+    atomic_write_bytes(dest, buf.getvalue())
     return dest
 
 

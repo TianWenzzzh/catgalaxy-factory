@@ -8,7 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from .config import WORKSPACE, ensure_dirs, project_dir
+from .config import (WORKSPACE, atomic_write_text, ensure_dirs, project_dir,
+                     retry_read_text)
 from .models import CalibData, MergeBook, ProjectMeta
 
 _SLUG_BAD = re.compile(r'[\\/:*?"<>|\s]+')
@@ -40,18 +41,26 @@ def meta_path(pid: str) -> Path:
 def save_meta(meta: ProjectMeta) -> None:
     ensure_dirs(meta.id)
     meta.updated_at = _now()
-    meta_path(meta.id).write_text(
-        json.dumps(meta.model_dump(), ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(
+        meta_path(meta.id), json.dumps(meta.model_dump(), ensure_ascii=False, indent=2))
 
 
 def load_meta(pid: str) -> Optional[ProjectMeta]:
-    p = meta_path(pid)
-    if not p.exists():
+    """读项目元数据。只有文件确实不存在才返回 None。
+
+    从前这里是 exists() + read_text + 一把 except Exception → None，
+    把两种完全不同的情况混成了一个返回值：项目真的不存在，和「写方正在
+    原子替换、读方 open 被 Windows 拒了」。后者会让一个好好存在的项目
+    从下拉框里消失，甚至对客户端回 404。共享冲突交给 retry_read_text 重试。
+    """
+    try:
+        text = retry_read_text(meta_path(pid))
+    except FileNotFoundError:
         return None
     try:
-        return ProjectMeta.model_validate(json.loads(p.read_text(encoding="utf-8")))
+        return ProjectMeta.model_validate(json.loads(text))
     except Exception:
-        return None
+        return None      # 内容确实坏了，这跟「暂时读不到」是两回事
 
 
 def list_projects() -> list[ProjectMeta]:
@@ -95,11 +104,12 @@ def calib_path(pid: str) -> Path:
 
 
 def load_calib(pid: str) -> Optional[CalibData]:
-    p = calib_path(pid)
-    if not p.exists():
-        return None
     try:
-        return CalibData.model_validate(json.loads(p.read_text(encoding="utf-8")))
+        text = retry_read_text(calib_path(pid))
+    except FileNotFoundError:
+        return None      # 没人标定过，星位走算法推导
+    try:
+        return CalibData.model_validate(json.loads(text))
     except Exception:
         return None
 
@@ -107,8 +117,8 @@ def load_calib(pid: str) -> Optional[CalibData]:
 def save_calib(pid: str, calib: CalibData) -> CalibData:
     ensure_dirs(pid)
     calib.updated_at = _now()
-    calib_path(pid).write_text(
-        json.dumps(calib.model_dump(), ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(
+        calib_path(pid), json.dumps(calib.model_dump(), ensure_ascii=False, indent=2))
     return calib
 
 
@@ -129,19 +139,23 @@ def merge_path(pid: str) -> Path:
 
 
 def load_merge(pid: str) -> MergeBook:
-    p = merge_path(pid)
-    if not p.exists():
+    """读归并判定账本。共享冲突必须重试，不能退化成空账本——
+    put_merge 是「load → 加一条 → 整份存回」，一次瞬时读失败就会
+    把之前所有人工判定抹掉。"""
+    try:
+        text = retry_read_text(merge_path(pid))
+    except FileNotFoundError:
         return MergeBook()
     try:
-        return MergeBook.model_validate(json.loads(p.read_text(encoding="utf-8")))
+        return MergeBook.model_validate(json.loads(text))
     except Exception:
         return MergeBook()
 
 
 def save_merge(pid: str, book: MergeBook) -> MergeBook:
     ensure_dirs(pid)
-    merge_path(pid).write_text(
-        json.dumps(book.model_dump(), ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(
+        merge_path(pid), json.dumps(book.model_dump(), ensure_ascii=False, indent=2))
     return book
 
 
