@@ -36,6 +36,7 @@ def _write(path: Path, content) -> None:
 def build_relative_bundle(dest: Path, *, html: str, html_name: str,
                           photos: dict[str, bytes],
                           map_bytes: Optional[bytes] = None,
+                          logo_bytes: Optional[bytes] = None,
                           roster_csv: Optional[str] = None,
                           report_md: Optional[str] = None,
                           summary_md: Optional[str] = None) -> list[str]:
@@ -50,6 +51,11 @@ def build_relative_bundle(dest: Path, *, html: str, html_name: str,
     if map_bytes:
         _write(dest / "assets" / "map.jpg", map_bytes)
         written.append("assets/map.jpg")
+
+    # 文件名必须是 assets/logo.png——injector 的 src 白名单只认这一个相对路径。
+    if logo_bytes:
+        _write(dest / "assets" / "logo.png", logo_bytes)
+        written.append("assets/logo.png")
 
     for name, blob in sorted(photos.items()):
         rel = f"assets/photos/{name}"

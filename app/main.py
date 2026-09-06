@@ -1,10 +1,12 @@
 """喵星图工厂 · FastAPI 入口。"""
 from __future__ import annotations
 
+import base64
 import csv
 import io
 import json
 import shutil
+from dataclasses import asdict
 from datetime import date
 from pathlib import Path
 from typing import Optional
@@ -12,21 +14,27 @@ from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+                               PlainTextResponse, Response)
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from . import (census_parser, image_proc, injector, locking, merge, packager,
                progress, store, summary_writer)
-from .config import (IMAGE_EXTS, MAX_PHOTOS_PER_PROJECT, MAX_PHOTOS_PER_UPLOAD,
-                     MAX_UPLOAD_BYTES, ROSTER_COLUMNS, WORKSPACE, atomic_write_bytes,
-                     atomic_write_text, ensure_dirs, retry_read_bytes, retry_read_text)
+from .config import (IMAGE_EXTS, LOGO_EXTS, MAX_LOGO_UPLOAD_BYTES,
+                     MAX_PHOTOS_PER_PROJECT, MAX_PHOTOS_PER_UPLOAD, MAX_UPLOAD_BYTES,
+                     ROSTER_COLUMNS, WORKSPACE, atomic_write_bytes, atomic_write_text,
+                     ensure_dirs, retry_read_bytes, retry_read_text)
 from .csv_loader import build_column_map, decode_bytes, empty_template, normalize_id, parse_roster
 from .image_proc import generate_default_map
 from .injector import build_photo_chunks, render_starmap
 from .models import (CalibData, CalibPoint, CalibUpdateRequest, CreateProjectRequest,
                      GenerateRequest, MergeDecision, MergeDecisionRequest, ProjectMeta,
-                     RosterPatch, ValidationReport)
+                     RosterPatch, ThemeUpdateRequest, ValidationReport)
+# 按名字导入而不是 `from . import theme`：generate_bundle 里有个局部变量就叫
+# theme，模块名被它遮住之后想在同一个函数里调 theme.css_block 就会莫名其妙地炸。
+from .theme import (DEFAULT_PRESET, MAX_SIGNATURE, Theme, color_menu, font_menu,
+                    preset_menu)
 from .validate import passing_rows, report_markdown, validate
 
 app = FastAPI(title="喵星图工厂 CatGalaxy Factory", version="1.0.0")
@@ -178,6 +186,13 @@ def generate_bundle(pid: str, form: str = "relative", *,
     map_bytes = retry_read_bytes(store.map_path(pid))
     map_size = _map_size(pid)
     calib_override = _calib_positions(pid)
+    theme = store.load_theme(pid)
+    logo_bytes = store.load_logo(pid)
+    # inline 形态必须自包含，校徽只能内嵌；相对形态写文件、HTML 里给相对路径。
+    logo_src = ""
+    if logo_bytes:
+        logo_src = (f"data:image/png;base64,{base64.b64encode(logo_bytes).decode('ascii')}"
+                    if form == "inline" else "assets/logo.png")
     html_name = packager.html_basename(meta.school)
     dest = _bundle_dir(pid, form)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -204,7 +219,8 @@ def generate_bundle(pid: str, form: str = "relative", *,
         html = render_starmap(school=meta.school, subtitle=meta.subtitle, rows=rows,
                               form=form, map_filename="assets/map.jpg",
                               photo_script_names=[n for n, _ in chunks],
-                              calib=calib_override, map_size=map_size)
+                              calib=calib_override, map_size=map_size,
+                              theme=theme, logo_src=logo_src)
         written = packager.build_inline_bundle(dest, html=html, html_name=html_name,
                                                chunks=chunks, roster_csv=roster_csv,
                                                report_md=md, summary_md=summary_md)
@@ -212,9 +228,11 @@ def generate_bundle(pid: str, form: str = "relative", *,
         html = render_starmap(school=meta.school, subtitle=meta.subtitle, rows=rows,
                               form=form, map_filename="assets/map.jpg",
                               photo_script_names=[],
-                              calib=calib_override, map_size=map_size)
+                              calib=calib_override, map_size=map_size,
+                              theme=theme, logo_src=logo_src)
         written = packager.build_relative_bundle(dest, html=html, html_name=html_name,
                                                  photos=photos, map_bytes=map_bytes,
+                                                 logo_bytes=logo_bytes,
                                                  roster_csv=roster_csv, report_md=md,
                                                  summary_md=summary_md)
 
@@ -230,7 +248,8 @@ def generate_bundle(pid: str, form: str = "relative", *,
     store.log(meta, "生成星图",
               f"form={form} cats={len(rows)} photos={len(photos)} "
               f"exclude_low={exclude_low_confidence} "
-              f"标定={calib_stat['manual']}/{calib_stat['total']} zip={zip_path.name}")
+              f"标定={calib_stat['manual']}/{calib_stat['total']} "
+              f"主题={theme.preset} 校徽={'有' if logo_bytes else '无'} zip={zip_path.name}")
 
     missing_photos = sorted(referenced - set(photos))
     return {
@@ -243,6 +262,11 @@ def generate_bundle(pid: str, form: str = "relative", *,
         "files": written,
         "stats": stats,
         "calib": calib_stat,
+        "theme": {"preset": theme.preset,
+                  "custom_colors": len(theme.colors),
+                  "signature": theme.footer_signature,
+                  "logo": bool(logo_bytes),
+                  "logo_bytes": len(logo_bytes or b"")},
         "map_size": list(map_size) if map_size else None,
         "html_name": html_name,
         "preview_url": f"/bundle/{pid}/out/{form}/{quote(html_name)}",
@@ -635,6 +659,147 @@ def delete_calib(pid: str) -> dict:
     if removed:
         store.log(meta, "清除星位标定", "回到算法推导坐标")
     return {"cleared": removed}
+
+
+# ---------- 路由：F11 星图主题化 ----------
+
+def _logo_url(pid: str) -> str:
+    """带 mtime 版本号：路径固定，不加版本浏览拿到的会是换徽章之前的那张。"""
+    p = store.logo_path(pid)
+    if not p.exists():
+        return ""
+    try:
+        v = p.stat().st_mtime_ns
+    except OSError:
+        v = 0
+    return f"/api/projects/{pid}/logo?v={v}"
+
+
+def _theme_payload(pid: str, rejected: Optional[list[str]] = None) -> dict:
+    th = store.load_theme(pid)
+    return {
+        "theme": asdict(th),
+        # 生效色由服务端算好再给。前端要是自己按预设调色板拼，就等于把配色白名单
+        # 在 JS 里又实现了一遍——两处规则迟早对不上，而这里给的正是产物里会用的值。
+        "effective_colors": th.effective_colors(),
+        "has_logo": store.logo_path(pid).exists(),
+        "logo_url": _logo_url(pid),
+        "rejected": rejected or [],
+        "note": "主题改动只影响之后生成的产物——改完要重新点「生成星图」。",
+    }
+
+
+@app.get("/api/theme/options")
+def theme_options() -> dict:
+    """预设 / 字体 / 可改颜色项的清单。与项目无关，做成全局端点。"""
+    return {
+        "presets": preset_menu(),
+        "fonts": font_menu(),
+        "colors": color_menu(),
+        "max_signature": MAX_SIGNATURE,
+        "default_preset": DEFAULT_PRESET,
+    }
+
+
+@app.get("/api/projects/{pid}/theme")
+def get_theme(pid: str) -> dict:
+    _meta_or_404(pid)
+    return _theme_payload(pid)
+
+
+@app.put("/api/projects/{pid}/theme", dependencies=[_GUARD])
+def put_theme(pid: str, req: ThemeUpdateRequest) -> dict:
+    """改主题。字段留 None 表示「这项不动」，前端只发用户碰过的。
+
+    非法值不报错，而是丢掉并在 rejected 里说明——一个手改坏的 theme.json
+    不该让整个项目生成不了。
+    """
+    meta = _meta_or_404(pid)
+
+    if req.reset:
+        store.clear_theme(pid)
+        store.log(meta, "重置星图主题", "回到默认预设（校徽保留，要删请单独删）")
+        return _theme_payload(pid)
+
+    cur = store.load_theme(pid)
+    draft = Theme(
+        preset=cur.preset if req.preset is None else req.preset,
+        colors=dict(cur.colors) if req.colors is None else dict(req.colors),
+        title_font=cur.title_font if req.title_font is None else req.title_font,
+        body_font=cur.body_font if req.body_font is None else req.body_font,
+        footer_signature=(cur.footer_signature if req.footer_signature is None
+                          else req.footer_signature),
+    )
+    rejected = draft.rejected()          # 归一化之前问，不然就查不出丢了什么
+    saved = store.save_theme(pid, draft)
+    store.log(meta, "修改星图主题",
+              f"预设={saved.preset} 自定义色={len(saved.colors)} "
+              f"标题字体={saved.title_font} 正文字体={saved.body_font} "
+              f"署名={len(saved.footer_signature)}字 丢弃={len(rejected)}")
+    return _theme_payload(pid, rejected)
+
+
+@app.delete("/api/projects/{pid}/theme", dependencies=[_GUARD])
+def delete_theme(pid: str) -> dict:
+    meta = _meta_or_404(pid)
+    cleared = store.clear_theme(pid)
+    if cleared:
+        store.log(meta, "重置星图主题", "回到默认预设")
+    return _theme_payload(pid)
+
+
+@app.post("/api/projects/{pid}/logo", dependencies=[_GUARD])
+async def upload_logo(pid: str, file: UploadFile = File(...)) -> dict:
+    """上传校徽。一律重编码成 256px 以内的 PNG。"""
+    meta = _meta_or_404(pid)
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in LOGO_EXTS:
+        raise HTTPException(400, f"校徽只收 {'、'.join(sorted(LOGO_EXTS))}。"
+                                 f"SVG 能带 <script>，产物要挂到学校公众号上，不收。")
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "上传的校徽是空文件")
+    if len(data) > MAX_LOGO_UPLOAD_BYTES:
+        raise HTTPException(413, f"校徽原图 {len(data) / 1024 / 1024:.1f}MB 超过 "
+                                 f"{MAX_LOGO_UPLOAD_BYTES // 1024 // 1024}MB 上限，"
+                                 f"请先导出成小一点的位图")
+    if not image_proc.looks_like_image(data):
+        raise HTTPException(400, "校徽不是有效图片")
+
+    # Pillow 解码挪到线程池：一张 4MB 的 PNG 解起来能在事件循环上坐几百毫秒，
+    # 那段时间进度接口一个请求都答不上来（照片入库踩过同一个坑）。
+    try:
+        blob, info = await run_in_threadpool(image_proc.process_logo, data)
+    except Exception:
+        raise HTTPException(400, "校徽解不开，换一张试试") from None
+
+    store.save_logo(pid, blob)
+    store.log(meta, "上传校徽",
+              f"{info['src_width']}×{info['src_height']} → "
+              f"{info['width']}×{info['height']} {info['out_bytes'] / 1024:.0f}KB")
+    return {"ok": True, "width": info["width"], "height": info["height"],
+            "bytes": info["out_bytes"], "resized": info["resized"],
+            "url": _logo_url(pid), **_theme_payload(pid)}
+
+
+@app.get("/api/projects/{pid}/logo")
+def get_logo(pid: str) -> Response:
+    """校徽原字节，给控制台预览用。读路由不挂锁。"""
+    _meta_or_404(pid)
+    blob = store.load_logo(pid)
+    if blob is None:
+        raise HTTPException(404, "还没有上传校徽")
+    return Response(content=blob, media_type="image/png")
+
+
+@app.delete("/api/projects/{pid}/logo", dependencies=[_GUARD])
+def delete_logo(pid: str) -> dict:
+    meta = _meta_or_404(pid)
+    removed = store.clear_logo(pid)
+    if removed:
+        store.log(meta, "删除校徽", "顶栏不再显示徽章")
+    return _theme_payload(pid)
 
 
 # ---------- 路由：F9 归并工作台 ----------

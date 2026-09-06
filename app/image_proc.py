@@ -11,9 +11,10 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter
 
-from .config import (IMAGE_EXTS, MAX_MAP_SIDE, MAX_PHOTO_BYTES, MAX_PHOTO_SIDE,
-                     MAX_PHOTOS_PER_UPLOAD, MAX_ZIP_DEPTH, MAX_ZIP_ENTRIES,
-                     MAX_ZIP_INFLATED_BYTES, ZIP_READ_CHUNK, atomic_write_bytes)
+from .config import (IMAGE_EXTS, MAX_LOGO_SIDE, MAX_MAP_SIDE, MAX_PHOTO_BYTES,
+                     MAX_PHOTO_SIDE, MAX_PHOTOS_PER_UPLOAD, MAX_ZIP_DEPTH,
+                     MAX_ZIP_ENTRIES, MAX_ZIP_INFLATED_BYTES, ZIP_READ_CHUNK,
+                     atomic_write_bytes)
 
 _UNSAFE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
@@ -103,6 +104,48 @@ def process_and_save(data: bytes, dest_dir: Path, filename: str) -> tuple[Path, 
     info["filename"] = out_path.name
     info["path"] = str(out_path)
     return out_path, info
+
+
+def _open_rgba(data: bytes) -> Image.Image:
+    """打开成带透明通道的图。
+
+    不能复用 _open_rgb：那个会把透明区糊成白底——照片糊白是对的（JPEG 本来
+    就没透明），校徽糊白就在深色星图上留一个白方块。GIF / 调色板 PNG 的透明
+    由 Pillow 在 convert("RGBA") 时还原，不用自己拆 transparency 键。
+    """
+    img = Image.open(io.BytesIO(data))
+    img.seek(0)                       # 动图只取第一帧（存 PNG 之后本来也不会动）
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
+    return img
+
+
+def process_logo(data: bytes, max_side: int = MAX_LOGO_SIDE) -> tuple[bytes, dict]:
+    """校徽 → 统一尺寸的 PNG 字节。返回 (png_bytes, info)。
+
+    一律重编码：调用方（store.logo_path / packager / 前端预览）就不用猜扩展名，
+    也顺手把上传件里可能夹带的非图像字节挡在 Pillow 那一步。
+    """
+    img = _open_rgba(data)
+    src_size = len(data)
+    w, h = img.size
+
+    if max(w, h) > max_side:
+        scale = max_side / float(max(w, h))
+        img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+
+    buf = io.BytesIO()
+    img.save(buf, "PNG", optimize=True)
+    blob = buf.getvalue()
+    return blob, {
+        "src_bytes": src_size,
+        "out_bytes": len(blob),
+        "src_width": w,
+        "src_height": h,
+        "width": img.size[0],
+        "height": img.size[1],
+        "resized": (w, h) != img.size,
+    }
 
 
 class ZipBudget:

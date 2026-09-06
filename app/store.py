@@ -4,13 +4,15 @@ from __future__ import annotations
 import json
 import re
 import time
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from .config import (WORKSPACE, atomic_write_text, ensure_dirs, project_dir,
-                     retry_read_text)
+from .config import (WORKSPACE, atomic_write_bytes, atomic_write_text, ensure_dirs,
+                     project_dir, retry_read_bytes, retry_read_text)
 from .models import CalibData, MergeBook, ProjectMeta
+from .theme import Theme
 
 _SLUG_BAD = re.compile(r'[\\/:*?"<>|\s]+')
 
@@ -173,3 +175,75 @@ def safe_name(name: str, fallback: str = "校园") -> str:
     s = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "", (name or "").strip())
     s = re.sub(r"\s+", "", s)
     return s[:40] or fallback
+
+
+# ---------- F11 · 主题与校徽 ----------
+
+def theme_path(pid: str) -> Path:
+    return project_dir(pid) / "theme.json"
+
+
+def load_theme(pid: str) -> Theme:
+    """读主题。没配过就回默认主题，产物长相与主题化之前完全一致。
+
+    坏文件也退成默认，不抛——theme.json 可能是用户手改的，为一个配色把
+    整个「生成星图」打成 500 不值当。
+    """
+    try:
+        text = retry_read_text(theme_path(pid))
+    except FileNotFoundError:
+        return Theme()
+    try:
+        data = json.loads(text)
+        known = {f for f in Theme.__dataclass_fields__}
+        return Theme(**{k: v for k, v in data.items() if k in known}).normalized()
+    except Exception:
+        return Theme()
+
+
+def save_theme(pid: str, theme: Theme) -> Theme:
+    ensure_dirs(pid)
+    theme = theme.normalized()
+    theme.updated_at = _now()
+    atomic_write_text(theme_path(pid),
+                      json.dumps(asdict(theme), ensure_ascii=False, indent=2))
+    return theme
+
+
+def clear_theme(pid: str) -> bool:
+    p = theme_path(pid)
+    if p.exists():
+        p.unlink()
+        return True
+    return False
+
+
+def logo_path(pid: str) -> Path:
+    """校徽统一存成 logo.png。
+
+    上传什么都重编码成 PNG：调用方不用猜扩展名，打包时也只有一个文件名要
+    处理。代价是动图会变静图——校徽基本没有动的，这笔买卖划算。
+    """
+    return project_dir(pid) / "logo.png"
+
+
+def save_logo(pid: str, png_bytes: bytes) -> Path:
+    ensure_dirs(pid)
+    p = logo_path(pid)
+    atomic_write_bytes(p, png_bytes)
+    return p
+
+
+def load_logo(pid: str) -> Optional[bytes]:
+    try:
+        return retry_read_bytes(logo_path(pid))
+    except FileNotFoundError:
+        return None
+
+
+def clear_logo(pid: str) -> bool:
+    p = logo_path(pid)
+    if p.exists():
+        p.unlink()
+        return True
+    return False

@@ -15,6 +15,14 @@ WORKSPACE = ROOT / "workspace"
 MAX_PHOTO_SIDE = 1200
 MAX_PHOTO_BYTES = 200 * 1024
 MAX_MAP_SIDE = 1920
+
+# F11 校徽。页面上只占 34px 见方，存 256px 已经留了 7 倍余量；原图上限卡 4MB，
+# 免得一个 3000dpi 的印刷稿在 Pillow 打开之前就把内存吃掉。
+# LOGO_EXTS 故意不含 .svg——SVG 能带 <script>，而产物是要挂到公众号上的。
+MAX_LOGO_SIDE = 256
+MAX_LOGO_UPLOAD_BYTES = 4 * 1024 * 1024
+LOGO_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+
 DEFAULT_MAP_W = 1920                  # 底图逻辑尺寸兜底值（无真实底图时使用）
 DEFAULT_MAP_H = 1239
 PHOTO_CHUNK_BYTES = 1_500_000  # base64 分片大小（inline 形态）

@@ -239,3 +239,44 @@ code.cd{font-family:ui-monospace,Consolas,monospace;font-size:10px;color:#93a6d6
 .prog.err .progTrack i{background:linear-gradient(90deg,var(--red),#ffc2cd)}
 .prog.err .progPhase{background:var(--red);color:#2a0a12}
 .prog.stale .progNote{color:var(--gold)}
+
+/* F11 星图主题 */
+.presets{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:8px;margin:2px 0 12px}
+.preset{display:flex;gap:8px;align-items:center;padding:8px 10px;border-radius:10px;cursor:pointer;
+  border:1px solid var(--line);background:rgba(8,14,32,.5);transition:.18s;text-align:left;font-family:inherit}
+.preset:hover{border-color:rgba(255,233,168,.55);transform:translateY(-1px)}
+.preset.on{border-color:rgba(255,215,106,.62);background:rgba(255,215,106,.09);
+  box-shadow:0 0 0 1px rgba(255,215,106,.2) inset}
+.preset .sw{display:flex;gap:3px;flex:0 0 auto}
+.preset .sw i{width:11px;height:11px;border-radius:50%;display:block;
+  border:1px solid rgba(255,255,255,.22)}
+.preset .pt{min-width:0}
+.preset b{display:block;font-size:11.5px;color:#dfe8ff;font-weight:600}
+.preset.on b{color:var(--gold-soft)}
+.preset small{display:block;font-size:10px;color:var(--dimmer);line-height:1.45;margin-top:1px}
+
+.themeCols{display:grid;grid-template-columns:repeat(auto-fit,minmax(232px,1fr));gap:13px}
+.colorGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));gap:7px}
+.cfield{display:flex;align-items:center;gap:7px;padding:5px 8px;border-radius:9px;margin:0;
+  border:1px solid var(--line);background:rgba(8,14,32,.5);font-size:11px;color:#c8d5f2}
+.cfield.custom{border-color:rgba(125,232,216,.42)}
+/* input[type=color] 不吃上面那条通配宽度规则，自己给尺寸；浏览器自带的边框和
+   内边距会把 26px 的色块撑成 34px，所以 appearance 和 padding 一起清掉。 */
+.cfield input[type=color]{width:26px;height:22px;flex:0 0 auto;margin:0;padding:0;cursor:pointer;
+  border:1px solid var(--line);border-radius:6px;background:none}
+.cfield input[type=color]::-webkit-color-swatch-wrapper{padding:1px}
+.cfield input[type=color]::-webkit-color-swatch{border:none;border-radius:4px}
+.cfield span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cfield em{font-style:normal;color:var(--teal);font-size:9.5px;flex:0 0 auto}
+
+.logoPreview{width:38px;height:38px;flex:0 0 auto;object-fit:contain;border-radius:8px;
+  border:1px solid var(--line);background:rgba(6,11,26,.72);
+  /* 棋盘格：透明区得看得出来是透明，不然「保留了 alpha」这件事没人能验证 */
+  background-image:linear-gradient(45deg,rgba(140,170,255,.14) 25%,transparent 25%,transparent 75%,rgba(140,170,255,.14) 75%),
+                   linear-gradient(45deg,rgba(140,170,255,.14) 25%,transparent 25%,transparent 75%,rgba(140,170,255,.14) 75%);
+  background-size:10px 10px;background-position:0 0,5px 5px}
+
+.rejected{margin-top:9px;font-size:11px;line-height:1.75;color:var(--gold);
+  border:1px solid rgba(255,215,106,.34);background:rgba(255,215,106,.07);
+  border-radius:9px;padding:7px 10px}
+.rejected b{color:var(--gold-soft)}

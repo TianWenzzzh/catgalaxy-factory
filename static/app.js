@@ -239,6 +239,7 @@ $("#btnCreate").addEventListener("click", async () => {
     setStep(2, [1]);
     await refreshProjects();
     await refreshCalib();
+    await loadTheme();
     toast(`项目「${school}」已创建`, "ok");
   } catch (e) { toast("创建失败：" + e.message, "err"); }
 });
@@ -280,6 +281,7 @@ $("#projList").addEventListener("change", async (e) => {
     if (d.report) { state.report = d.report; renderReport(d.report); }
     setStep(3, [1, 2]);
     await refreshCalib();
+    await loadTheme();
     await scanMerge();
     toast("项目已载入", "ok");
   } catch (err) { toast("载入失败：" + err.message, "err"); }
@@ -480,6 +482,10 @@ $("#btnGenerate").addEventListener("click", async () => {
       <div><span class="k">分区</span> ${zones || "—"}</div>
       <div><span class="k">毛色</span> ${coats || "—"}</div>
       <div><span class="k">文件</span> ${escapeHtml(r.html_name)} + ${r.files.length - 1} 个附件</div>
+      ${r.theme ? `<div><span class="k">主题</span> <b>${escapeHtml(labelOf((themeOpts || {}).presets || [], r.theme.preset))}</b>` +
+        (r.theme.custom_colors ? ` · 自定义色 ${r.theme.custom_colors} 项` : "") +
+        ` · 校徽 ${r.theme.logo ? `已内嵌 ${(r.theme.logo_bytes / 1024).toFixed(0)}KB` : "无"}` +
+        (r.theme.signature ? ` · 署名「${escapeHtml(r.theme.signature)}」` : "") + `</div>` : ""}
       ${r.calib ? `<div><span class="k">星位</span> 人工标定 <b>${r.calib.manual}</b> / ${r.calib.total} 颗${r.calib.manual ? "" : "（未标定 → 星星只按分区聚拢，不对应真实地理位置，可用下方 F8 面板标定）"}</div>` : ""}
       ${r.missing_photos.length ? `<div style="color:var(--red)">缺照片 ${r.missing_photos.length} 张：${r.missing_photos.slice(0, 5).map(escapeHtml).join(", ")}</div>` : ""}
       <div><span class="k">包名</span> <b>${escapeHtml(r.zip_name)}</b></div>`;
@@ -852,6 +858,177 @@ $("#btnClearEdits").addEventListener("click", () => {
   toast("已清空待改（名册文件未动）", "");
 });
 
+/* ---------- F11 星图主题 ---------- */
+let themeOpts = null;            // /api/theme/options 是全局的，拉一次就够
+let themeCur = null;             // 最近一次服务端回的主题快照
+let sigPending = null;           // 还没发出去的署名，见 buildThemeUI 里的 input 监听
+let sigTimer = null;             // 署名的防抖定时器；换项目/重置时要一并取消
+
+/* input[type=color] 只吃 #rrggbb。预设里的值本来就是，但 theme.json 是能被手改的，
+   #rgb / #rrggbbaa 也得能显示出来，不然控件会静默退回黑色，看着像「主题丢了」。 */
+function toColorInput(v, fallback) {
+  let h = String(v || "").trim().replace("#", "");
+  if (h.length === 3 || h.length === 4) h = h.split("").slice(0, 3).map((c) => c + c).join("");
+  if (h.length === 8) h = h.slice(0, 6);
+  h = "#" + (/^[0-9a-fA-F]{6}$/.test(h) ? h : String(fallback || "#000000").replace("#", ""));
+  return h.toLowerCase();
+}
+
+function buildThemeUI() {
+  const o = themeOpts;
+  $("#sigMax").textContent = o.max_signature;
+  $("#signature").maxLength = o.max_signature;
+
+  $("#presetBox").innerHTML = o.presets.map((p) => `
+    <button type="button" class="preset" data-k="${escapeHtml(p.key)}" title="${escapeHtml(p.blurb)}">
+      <span class="sw">${p.swatch.map((c) => `<i style="background:${escapeHtml(c)}"></i>`).join("")}</span>
+      <span class="pt"><b>${escapeHtml(p.label)}</b><small>${escapeHtml(p.blurb)}</small></span>
+    </button>`).join("");
+  $$("#presetBox .preset").forEach((b) => b.addEventListener("click", () => {
+    /* 换预设连带清掉自定义色：那八个值是相对旧预设的「覆盖」，留着的话新预设
+       会被上一套的零碎改动打得七零八落，用户看到的既不是这个预设也不是那个。 */
+    putTheme({ preset: b.dataset.k, colors: {} }, `已切到「${labelOf(o.presets, b.dataset.k)}」，自定义色已清空`);
+  }));
+
+  const opts = o.fonts.map((f) => `<option value="${escapeHtml(f.key)}">${escapeHtml(f.label)}</option>`).join("");
+  $("#titleFont").innerHTML = opts;
+  $("#bodyFont").innerHTML = opts;
+  $("#titleFont").addEventListener("change", (e) => putTheme({ title_font: e.target.value }, "标题字体已更新"));
+  $("#bodyFont").addEventListener("change", (e) => putTheme({ body_font: e.target.value }, "正文字体已更新"));
+
+  $("#colorBox").innerHTML = o.colors.map((c) => `
+    <label class="cfield" data-k="${escapeHtml(c.key)}" title="${escapeHtml(c.css)}">
+      <input type="color" data-k="${escapeHtml(c.key)}"><span>${escapeHtml(c.label)}</span><em hidden>改</em>
+    </label>`).join("");
+  $$("#colorBox input[type=color]").forEach((inp) => inp.addEventListener("change", (e) => {
+    const k = e.target.dataset.k;
+    const custom = Object.assign({}, (themeCur && themeCur.theme.colors) || {});
+    /* 调回预设原值就当没改过——不然用户试了几个颜色又调回去，theme.json 里
+       会留下一串毫无意义的覆盖项。 */
+    if (e.target.value.toLowerCase() === toColorInput(effColors()[k], "").toLowerCase()) delete custom[k];
+    else custom[k] = e.target.value;
+    putTheme({ colors: custom }, "配色已更新");
+  }));
+
+  $("#signature").addEventListener("input", () => {
+    /* 记下「还没发出去的值」而不是等 500ms 后再读输入框：这期间任何一次别的主题
+       改动都会触发 paintTheme，把框重置成服务端还没收到署名的旧值，
+       于是「打完署名顺手点个颜色」就把署名吞了。 */
+    sigPending = $("#signature").value;
+    clearTimeout(sigTimer);
+    sigTimer = setTimeout(async () => {
+      const val = sigPending;
+      await putTheme({ footer_signature: val }, "页脚署名已更新");
+      if (sigPending === val) sigPending = null;
+    }, 500);
+  });
+}
+
+const labelOf = (arr, k) => ((arr.find((x) => x.key === k) || {}).label) || k;
+const effColors = () => (themeCur && themeCur.effective_colors) || {};
+
+function paintTheme() {
+  if (!themeCur) return;
+  const t = themeCur.theme, eff = effColors();
+  $$("#presetBox .preset").forEach((b) => b.classList.toggle("on", b.dataset.k === t.preset));
+  $("#titleFont").value = t.title_font;
+  $("#bodyFont").value = t.body_font;
+  if (sigPending === null && document.activeElement !== $("#signature")) {
+    $("#signature").value = t.footer_signature || "";
+  }
+  $$("#colorBox input[type=color]").forEach((inp) => {
+    const k = inp.dataset.k;
+    inp.value = toColorInput(eff[k], "#000000");
+    const custom = Object.prototype.hasOwnProperty.call(t.colors || {}, k);
+    inp.closest(".cfield").classList.toggle("custom", custom);
+    inp.closest(".cfield").querySelector("em").hidden = !custom;
+  });
+  $("#logoState").textContent = themeCur.has_logo ? "已上传" : "未上传";
+  $("#logoState").className = themeCur.has_logo ? "ok" : "";
+  $("#btnLogoDel").disabled = !themeCur.has_logo;
+  const pv = $("#logoPreview");
+  pv.hidden = !themeCur.has_logo;
+  if (themeCur.has_logo) pv.src = themeCur.logo_url;
+
+  const nCustom = Object.keys(t.colors || {}).length;
+  $("#themeState").innerHTML =
+    `预设 <b>${escapeHtml(labelOf(themeOpts.presets, t.preset))}</b>` +
+    (nCustom ? ` ｜ 自定义色 <b>${nCustom}</b> 项` : "") +
+    (t.footer_signature ? ` ｜ 署名 ${t.footer_signature.length} 字` : "") +
+    (themeCur.has_logo ? " ｜ 校徽 ✓" : "");
+
+  const rej = themeCur.rejected || [];
+  const box = $("#themeRejected");
+  box.hidden = !rej.length;
+  if (rej.length) {
+    box.innerHTML = `<b>有 ${rej.length} 处输入被丢弃（不影响生成）：</b><br>` +
+      rej.map((r) => "· " + escapeHtml(r)).join("<br>");
+  }
+}
+
+async function putTheme(patch, okMsg) {
+  if (!needPid()) { paintTheme(); return; }
+  try {
+    themeCur = await api(`/api/projects/${state.pid}/theme`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    paintTheme();
+    const rej = themeCur.rejected || [];
+    toast(rej.length ? `${rej.length} 处被丢弃：${rej[0]}` : (okMsg + " · 记得重新生成星图"),
+          rej.length ? "err" : "ok");
+  } catch (e) { toast("主题保存失败：" + e.message, "err"); }
+}
+
+async function loadTheme() {
+  clearTimeout(sigTimer); sigPending = null;      // 上个项目没发出去的署名不能带过来
+  if (!state.pid) { themeCur = null; $("#themeState").textContent = "尚未选择项目"; return; }
+  try {
+    themeCur = await api(`/api/projects/${state.pid}/theme`);
+    paintTheme();
+  } catch (e) { $("#themeState").textContent = "主题读取失败：" + e.message; }
+}
+
+$("#btnThemeReset").addEventListener("click", async () => {
+  if (!needPid()) return;
+  clearTimeout(sigTimer); sigPending = null;      // 防抖里那条旧署名不许在重置之后追上来
+  try {
+    themeCur = await api(`/api/projects/${state.pid}/theme`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reset: true }),
+    });
+    paintTheme();
+    toast(themeCur.has_logo ? "已恢复默认主题（校徽保留，要删请点「删除校徽」）"
+                            : "已恢复默认主题", "ok");
+  } catch (e) { toast("重置失败：" + e.message, "err"); }
+});
+
+bindDrop("#dropLogo", "#logoFile", "#logoState", async (files) => {
+  if (!needPid()) return;
+  const fd = new FormData(); fd.append("file", files[0]);
+  $("#logoState").textContent = "上传中…";
+  try {
+    const r = await api(`/api/projects/${state.pid}/logo`, { method: "POST", body: fd });
+    themeCur = r; paintTheme();
+    toast(`校徽已入库：${r.width}×${r.height} · ${(r.bytes / 1024).toFixed(0)}KB` +
+          (r.resized ? "（已缩放）" : "") + " · 记得重新生成星图", "ok");
+  } catch (e) {
+    $("#logoState").textContent = "被拒"; $("#logoState").className = "err";
+    toast("校徽被拒：" + e.message, "err");
+  }
+});
+
+$("#btnLogoDel").addEventListener("click", async () => {
+  if (!needPid()) return;
+  try {
+    themeCur = await api(`/api/projects/${state.pid}/logo`, { method: "DELETE" });
+    paintTheme();
+    toast("校徽已删除，顶栏不再显示徽章 · 记得重新生成星图", "ok");
+  } catch (e) { toast("删除失败：" + e.message, "err"); }
+});
+
 /* ---------- 启动 ---------- */
 refreshProjects();
 setStep(1);
+api("/api/theme/options").then((o) => { themeOpts = o; buildThemeUI(); })
+  .catch((e) => { $("#themeState").textContent = "主题选项载入失败：" + e.message; });

@@ -180,6 +180,45 @@
         </div>
         <div id="mergeList" class="merge"></div>
       </div>
+
+      <div class="card" id="c9">
+        <h2><span class="no">F11</span>星图主题 · 配色 / 字体 / 署名 / 校徽</h2>
+        <p class="hint">产物是要拷给别人、双击就能打开的，所以<b>不引用任何外部资源</b>：字体只用系统里
+          本来就有的（不打包 webfont），校徽在相对版里写成 <code>assets/logo.png</code>、内嵌版里转成
+          base64。预设全是深色底——星点是画在 canvas 上的亮色小圆点，换浅色底就是一片看不见星星的白。</p>
+
+        <div class="presets" id="presetBox"></div>
+
+        <div class="themeCols">
+          <div>
+            <label>标题字体<select id="titleFont"></select></label>
+            <label>正文字体<select id="bodyFont"></select></label>
+            <label>页脚署名（可选，最长 <b id="sigMax">120</b> 字）
+              <input id="signature" type="text" placeholder="如：××大学学生会 · 校园猫咪普查小组"></label>
+            <p class="hint">署名是<b>追加</b>，不是替换：数据源、生成日期、标定方式这三样是留痕要求，
+              想加自己的落款可以，想把出处抹掉不行。署名会被 HTML 转义，写标签也不会变成代码。</p>
+          </div>
+          <div>
+            <div class="colorGrid" id="colorBox"></div>
+            <p class="hint">改任一颜色即为「自定义」，会在切换预设时清空。值只收 <code>#RRGGBB</code>，
+              其余一律丢弃并提示——这些值会被拼进产物的 <code>&lt;style&gt;</code> 里。</p>
+          </div>
+        </div>
+
+        <label class="drop" id="dropLogo">
+          <input type="file" id="logoFile" accept=".png,.jpg,.jpeg,.webp,.bmp,.gif" hidden>
+          <b>校徽 / 院系徽标（可选）</b><span>png、jpg、webp、bmp、gif；<b>不收 svg</b>（svg 能带脚本，而产物要挂到学校公众号上）。自动缩到长边≤256px 并转成 PNG，保留透明区——校徽糊白底会在深色星图上留一个白方块</span>
+          <i id="logoState">未上传</i>
+        </label>
+
+        <div class="row">
+          <img id="logoPreview" class="logoPreview" alt="校徽预览" hidden>
+          <button id="btnThemeReset">↺ 恢复默认主题</button>
+          <button id="btnLogoDel" disabled>✕ 删除校徽</button>
+          <span class="hint" id="themeState">尚未选择项目</span>
+        </div>
+        <div id="themeRejected" class="rejected" hidden></div>
+      </div>
     </section>
   </div>
 </main>

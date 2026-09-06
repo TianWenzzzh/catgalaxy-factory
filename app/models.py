@@ -145,3 +145,18 @@ class RosterEdit(BaseModel):
 class RosterPatch(BaseModel):
     edits: list[RosterEdit] = Field(default_factory=list)
     revalidate: bool = True
+
+
+class ThemeUpdateRequest(BaseModel):
+    """F11 · 主题改动。留 None 表示「这项不动」，前端只发用户碰过的字段。
+
+    真正的合法性判定在 app/theme.py：颜色只收 #RRGGBB，字体只收白名单 key，
+    署名转义后截断。这一层只管形状。
+    """
+
+    preset: Optional[str] = None
+    colors: Optional[dict[str, str]] = None
+    title_font: Optional[str] = None
+    body_font: Optional[str] = None
+    footer_signature: Optional[str] = None
+    reset: bool = False               # True = 回到默认预设，清掉所有自定义

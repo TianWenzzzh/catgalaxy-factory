@@ -9,6 +9,8 @@
     --bg:#070c1c; --ink:#e8efff; --dim:#7e92c4;
     --gold:#ffd76a; --gold-soft:#ffe9a8; --teal:#7de8d8; --mag:#c48cff;
     --line:rgba(140,170,255,.16); --panel:rgba(10,18,40,.86);
+    --stats-ink:#9fb2e0; --title-glow:rgba(255,215,106,.34);
+    --scrim-top:rgba(5,9,22,.94); --scrim-mid:rgba(5,9,22,.55);
   }
   *{box-sizing:border-box}
   html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
@@ -19,13 +21,16 @@
 
   /* 顶栏 */
   header{position:fixed;top:0;left:0;right:0;z-index:20;padding:14px 18px 10px;
-    background:linear-gradient(180deg,rgba(5,9,22,.94),rgba(5,9,22,.55) 62%,transparent);
+    background:linear-gradient(180deg,var(--scrim-top),var(--scrim-mid) 62%,transparent);
     pointer-events:none}
   header>*{pointer-events:auto}
+  .headRow{display:flex;align-items:center;gap:10px}
+  .logo{width:34px;height:34px;flex:0 0 auto;object-fit:contain;border-radius:7px;
+    border:1px solid var(--line);background:var(--panel)}
   h1{margin:0;font-size:19px;letter-spacing:.14em;font-weight:700;
-    color:var(--gold-soft);text-shadow:0 0 18px rgba(255,215,106,.34)}
+    color:var(--gold-soft);text-shadow:0 0 18px var(--title-glow)}
   .sub{margin:4px 0 0;font-size:12px;color:var(--dim);letter-spacing:.06em}
-  .stats{margin:3px 0 0;font-size:11.5px;color:#9fb2e0;letter-spacing:.04em}
+  .stats{margin:3px 0 0;font-size:11.5px;color:var(--stats-ink);letter-spacing:.04em}
 
   /* 工具条 */
   #bar{position:fixed;left:18px;bottom:18px;z-index:20;display:flex;gap:8px;flex-wrap:wrap;max-width:calc(100% - 36px)}
@@ -34,7 +39,7 @@
     color:#cdd9f5;transition:.18s;user-select:none;backdrop-filter:blur(8px)}
   .chip:hover{border-color:rgba(255,233,168,.6);color:var(--gold-soft);transform:translateY(-1px)}
   .chip.on{border-color:var(--gold);color:var(--gold-soft);box-shadow:0 0 14px rgba(255,215,106,.24)}
-  .chip .n{font-size:9.5px;font-weight:700;color:#7e92c4;background:rgba(120,150,220,.14);
+  .chip .n{font-size:9.5px;font-weight:700;color:var(--dim);background:rgba(120,150,220,.14);
     border-radius:999px;padding:1px 5px}
   .chip.on .n{color:#ffd98f;background:rgba(255,215,106,.2)}
 
@@ -114,14 +119,20 @@
     #card{bottom:62px}
   }
 </style>
+<!--__THEME_CSS__-->
 </head>
 <body>
 <canvas id="sky"></canvas>
 
 <header>
-  <h1>__TITLE__</h1>
-  <div class="sub">__SUBTITLE__</div>
-  <div class="stats">__STATS__</div>
+  <div class="headRow">
+    __LOGO_HTML__
+    <div class="headTxt">
+      <h1>__TITLE__</h1>
+      <div class="sub">__SUBTITLE__</div>
+      <div class="stats">__STATS__</div>
+    </div>
+  </div>
 </header>
 
 <div id="searchWrap">
@@ -181,7 +192,7 @@ function PH(p){var k=String(p||"").split("/").pop();return (window.__PHOTOS&&win
 </script>
 <script>
 /* =========================================================
- * __TITLE__ · 校园猫咪星系
+ * __TITLE_COMMENT__ · 校园猫咪星系
  * 由「喵星图工厂 CatGalaxy Factory」生成
  * 数据契约：CATS[]（12 键）+ CALIB{}（归一化坐标）
  * 星色 = 毛色分组 ｜ 星等 = 收录照片数 ｜ 星位 = 出没区域分区
@@ -204,6 +215,29 @@ const mapImg = new Image(); let mapReady = false;
 /* ---------- 工具 ---------- */
 const TAU = Math.PI * 2;
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+
+/* 主题色：CSS 变量是唯一来源。canvas 自己画不透明的天空和选中环，写死颜色的话
+   换主题只改了一半——面板变了，星星底下还是深蓝。这里在启动时读一次计算样式
+   （注入的主题样式表在 <head> 里，此时已生效），派生暗色阶用乘法：
+   shade(bg,.78) 与 shade(bg,.56) 恰好复现原先手挑的 #050918 / #04070f（误差 ≤2/255）。 */
+function cssVar(name){
+  return (getComputedStyle(document.documentElement).getPropertyValue(name) || "").trim();
+}
+function hexRGB(v){
+  let h = String(v || "").trim().replace("#", "");
+  if(h.length === 3 || h.length === 4) h = h.slice(0, 3).split("").map(c => c + c).join("");
+  if(h.length === 8) h = h.slice(0, 6);
+  if(!/^[0-9a-fA-F]{6}$/.test(h)) return null;
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+}
+function shade(rgb, f){ return `rgb(${rgb.map(v => Math.round(v * f)).join(",")})`; }
+function rgba(rgb, a){ return `rgba(${rgb.join(",")},${a})`; }
+const SKY = hexRGB(cssVar("--bg")) || [7, 12, 28];
+const ACCENT = hexRGB(cssVar("--gold")) || [255, 215, 106];
+const ACCENT_SOFT = hexRGB(cssVar("--gold-soft")) || [255, 233, 168];
+const TEAL = hexRGB(cssVar("--teal")) || [125, 232, 216];
+const CANVAS_FONT = getComputedStyle(document.body).fontFamily || "sans-serif";
+
 function hashStr(s){let h=2166136261;for(const c of String(s)){h^=c.codePointAt(0);h=Math.imul(h,16777619);}return h>>>0;}
 function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);
   t=t+Math.imul(t^t>>>7,61|t)^t;return ((t^t>>>14)>>>0)/4294967296;};}
@@ -315,7 +349,7 @@ function drawDust(){
 function drawNet(list){
   if(list.length < 2) return;
   ctx.save();
-  ctx.strokeStyle = "rgba(125,232,216,.14)"; ctx.lineWidth = 1;
+  ctx.strokeStyle = rgba(TEAL, .14); ctx.lineWidth = 1;
   const pts = list.map(c => { const p = toScreen(...Object.values(catPos(c)).slice(0,2)); return p; });
   for(let i=0;i<pts.length;i++){
     let best = -1, bd = 1e9;
@@ -388,18 +422,18 @@ function drawStar(c){
   // 命中/选中环
   if(state.hover === c || state.selected === c){
     ctx.save();
-    ctx.strokeStyle = state.selected === c ? "rgba(255,215,106,.95)" : "rgba(255,233,168,.6)";
+    ctx.strokeStyle = state.selected === c ? rgba(ACCENT, .95) : rgba(ACCENT_SOFT, .6);
     ctx.lineWidth = 1.4;
     ctx.beginPath(); ctx.arc(s.x, s.y, r * 3.4 + 6, 0, TAU); ctx.stroke();
-    ctx.fillStyle = "rgba(255,233,168,.94)";
-    ctx.font = "600 12px 'PingFang SC','Microsoft YaHei',sans-serif";
+    ctx.fillStyle = rgba(ACCENT_SOFT, .94);
+    ctx.font = `600 12px ${CANVAS_FONT}`;
     ctx.textAlign = "center";
     ctx.fillText(c.name, s.x, s.y - r * 3.4 - 12);
     ctx.restore();
   }else if(cam.z > .62){
     ctx.save();
     ctx.fillStyle = `rgba(214,226,255,${clamp(.34 + b*.3, 0, .8).toFixed(2)})`;
-    ctx.font = "11px 'PingFang SC','Microsoft YaHei',sans-serif";
+    ctx.font = `11px ${CANVAS_FONT}`;
     ctx.textAlign = "center";
     ctx.fillText(c.name, s.x, s.y + r * 3.1 + 11);
     ctx.restore();
@@ -410,7 +444,7 @@ function frame(ts){
   state.t = ts || 0;
   ctx.clearRect(0, 0, W, H);
   const bg = ctx.createLinearGradient(0, 0, 0, H);
-  bg.addColorStop(0, "#050918"); bg.addColorStop(.55, "#070c1c"); bg.addColorStop(1, "#04070f");
+  bg.addColorStop(0, shade(SKY, .78)); bg.addColorStop(.55, shade(SKY, 1)); bg.addColorStop(1, shade(SKY, .56));
   ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
   drawDust();
   drawMap();
