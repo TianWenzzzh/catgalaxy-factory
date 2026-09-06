@@ -129,6 +129,25 @@ def test_console_never_fabricates_a_cat_id():
     assert "CAT-" not in JS, "app.js 里出现了写死或拼出来的 CAT- 编号"
 
 
+def test_merge_cards_explain_the_visual_preordering():
+    """F9 组内已按「长得像不像」排过序，卡片上就得说清楚凭什么这么排。
+
+    后端排了序而前端不显示，人看到的只是「顺序莫名变了」；只给个百分比不说是
+    跟谁比的，人也还得自己两两看一遍——那这次预排序就白做了。
+    """
+    m = re.search(r"function renderMerge\((.*?)\n\}", JS, re.S)
+    assert m, "app.js 里没有 renderMerge"
+    body = m.group(1)
+    for field in ("m.visual", "visual_peer", "visual_top"):
+        assert field in body, f"renderMerge 没用到 {field}"
+    assert "视觉" in body, "卡片上没有「视觉相似度」字样，人看不出排序依据"
+
+
+def test_merge_state_reports_how_many_groups_were_visually_ranked():
+    """一张照片都没传时排序是无信息的，状态行得让人知道有几组真排上了序。"""
+    assert "hashed_groups" in JS, "app.js 没有用 /merge 返回的 hashed_groups"
+
+
 # ---------- 路由接线 ----------
 
 def canon(path: str) -> str:

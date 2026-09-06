@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from typing import Callable
 
+from . import phash
 from .csv_loader import normalize_id
 from .models import CatRow
 
@@ -103,6 +105,38 @@ def candidate_groups(rows: list[CatRow]) -> list[dict]:
             f"特征描述相似度 {sim:.0%}"))
 
     return sorted(groups, key=lambda g: (-g["score"], g["gid"]))
+
+
+def annotate_visual(group: dict, hash_of: Callable[[str], int | None]) -> dict:
+    """按「长得像不像」给候选组内的成员排序，并把最像的那一位记在每个成员身上。
+
+    `hash_of` 是「代表照片文件名 → 感知哈希（拿不到就 None）」的查询回调：照片在哪、
+    怎么解码由调用方决定，本模块不碰文件系统，排序逻辑才脱离磁盘也能单测。
+
+    只加字段、不改既有字段——`score` / `gid` / `reason` 是 F7 摘要和旧判定的契约，
+    视觉分只回答「先看谁」，不参与「可疑度」（同色猫扎堆本来就长得像）。
+    没有哈希的成员（没传照片、坏图）visual=0 沉到最后，但仍然列出来让人自己看。
+    """
+    members = group["members"]
+    hashes = [hash_of((m.get("photo") or "").strip()) for m in members]
+    best: list[tuple[float, str]] = []
+    for i, h in enumerate(hashes):
+        top, peer = 0.0, ""
+        if h is not None:
+            for j, other in enumerate(hashes):
+                if i == j or other is None:
+                    continue
+                s = phash.visual_similarity(h, other)
+                if s > top:
+                    top, peer = s, members[j]["id"]
+        best.append((top, peer))
+    for m, (s, peer) in zip(members, best):
+        m["visual"] = round(s, 3)
+        m["visual_peer"] = peer
+    group["visual_hashed"] = sum(1 for h in hashes if h is not None)
+    group["visual_top"] = round(max((s for s, _ in best), default=0.0), 3)
+    group["members"] = sorted(members, key=lambda m: -m["visual"])
+    return group
 
 
 def check_decision(group: dict, verdict: str, keep: str, drop: list[str],

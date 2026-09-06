@@ -91,6 +91,50 @@ def make_photo(width: int, height: int, seed: int) -> bytes:
     return buf.getvalue()
 
 
+SCENES = {
+    "橘猫": [(0.30, 0.45, 0.34, 0.30, (220, 150, 60)),
+             (0.34, 0.24, 0.14, 0.14, (235, 170, 80)),
+             (0.62, 0.62, 0.20, 0.12, (180, 120, 50))],
+    "三花": [(0.55, 0.30, 0.22, 0.40, (60, 60, 70)),
+             (0.20, 0.60, 0.30, 0.22, (240, 240, 240)),
+             (0.70, 0.70, 0.16, 0.16, (120, 80, 60))],
+}
+
+
+def make_scene_photo(kind: str, width: int = 1200, height: int = 900,
+                     quality: int = 95) -> bytes:
+    """有结构、像照片的样本图：渐变底 + 几个确定性的椭圆块。
+
+    不用 `make_photo`：那是高频噪点，缩到 64×64 就整片平坦，感知哈希会（正确地）
+    拒绝给它指纹。真实照片是低频结构（身体、背景、光影），这里就用低频结构模拟。
+    渐变也不逐像素画：先画 20×15 再放大，同样是低频，省掉二十几万次循环。
+    """
+    gw, gh = max(2, width // 60), max(2, height // 60)
+    small = Image.new("RGB", (gw, gh))
+    sp = small.load()
+    for y in range(gh):
+        for x in range(gw):
+            sp[x, y] = (x * 255 // (gw - 1), y * 255 // (gh - 1), 128)
+    img = small.resize((width, height), Image.BILINEAR)
+    d = ImageDraw.Draw(img)
+    for cx, cy, rw, rh, color in SCENES[kind]:
+        x0, y0 = int((cx - rw / 2) * width), int((cy - rh / 2) * height)
+        x1, y1 = int((cx + rw / 2) * width), int((cy + rh / 2) * height)
+        d.ellipse([x0, y0, x1, y1], fill=color)
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=quality)
+    return buf.getvalue()
+
+
+def recode_jpeg(blob: bytes, scale: float, quality: int) -> bytes:
+    """缩放 + 重压一遍：模拟「同一只猫的另一张入库副本」。"""
+    im = Image.open(io.BytesIO(blob))
+    im = im.resize((max(1, int(im.width * scale)), max(1, int(im.height * scale))))
+    buf = io.BytesIO()
+    im.save(buf, "JPEG", quality=quality)
+    return buf.getvalue()
+
+
 def read_text(path: Path) -> str:
     raw = path.read_bytes()
     for enc in ("utf-8-sig", "utf-8", "gb18030"):
@@ -457,6 +501,68 @@ def verify_roster_rows(client: TestClient, ev: Evidence, pid: str, n_cats: int) 
              f"CATS 回到 {d['cats']} 条（期望 {n_cats}）")
 
 
+def verify_merge_visual(client: TestClient, ev: Evidence) -> None:
+    """F9 视觉预排序：组内谁跟谁最像，先由感知哈希排一遍，人从左边第一对看起。
+
+    自建一个项目而不是复用主场景：四只猫必须同毛色、同出没区域、特征描述完全一样
+    才凑成一个候选组，而主场景的名册是真实数据，凑不出这种可控条件。
+      · 甲/乙 —— 同一张场景图，乙缩放重压过（模拟同一只猫的另一张入库副本）
+      · 丙   —— 明显是另一只
+      · 丁   —— 照片是纯色的：没有结构，哈希**该拒绝**给指纹，而不是发一个假的
+    """
+    pid = client.post("/api/projects", json={"school": "视觉验收校"}).json()["id"]
+    scene = make_scene_photo("橘猫")
+    flat = io.BytesIO()
+    Image.new("RGB", (600, 450), (200, 200, 200)).save(flat, "JPEG", quality=95)
+    photos = {"v-jia.jpg": scene, "v-yi.jpg": recode_jpeg(scene, 0.5, 70),
+              "v-bing.jpg": make_scene_photo("三花"), "v-ding.jpg": flat.getvalue()}
+    rows = [("CAT-001", "甲", "v-jia.jpg"), ("CAT-002", "乙", "v-yi.jpg"),
+            ("CAT-003", "丙", "v-bing.jpg"), ("CAT-004", "丁", "v-ding.jpg")]
+
+    out = io.StringIO()
+    w = csv.DictWriter(out, fieldnames=list(config.ROSTER_COLUMNS), extrasaction="ignore")
+    w.writeheader()
+    for cid, name, photo in rows:
+        w.writerow({"编号": cid, "昵称": name, "军衔": "喵员", "工位": "巡校内务",
+                    "毛色": "全橘虎斑", "特征描述": "体型胖 粉鼻 侧躺露肚",
+                    "代表照片文件": photo, "照片数量": "1", "出没区域": "宿舍楼前石台",
+                    "关联照片编号": "batch1:VIS", "置信度": "高", "备注": ""})
+    client.post(f"/api/projects/{pid}/roster",
+                files={"file": ("猫咪名册.csv", out.getvalue().encode("utf-8-sig"),
+                                "text/csv")})
+    r = client.post(f"/api/projects/{pid}/photos",
+                    files=[("files", (n, b, "image/jpeg")) for n, b in photos.items()])
+    ev.check("F9 视觉样本入库", r.status_code == 200 and r.json()["saved"] == 4,
+             f"{len(photos)} 张（甲原图 / 乙缩放重压 / 丙另一只 / 丁纯色）")
+    client.post(f"/api/projects/{pid}/validate")
+
+    j = client.get(f"/api/projects/{pid}/merge").json()
+    g = j["groups"][0]
+    members = g["members"]
+    by_id = {m["id"]: m for m in members}
+    order = [m["id"] for m in members]
+    vis = "、".join(f"{m['id']} {m['visual']:.0%}" for m in members)
+
+    ev.check("F9 组内按视觉相似度排序，最像的两只排在最前",
+             order[:2] == ["CAT-001", "CAT-002"] and order[-1] == "CAT-004",
+             f"顺序 {' → '.join(order)}；视觉 {vis}")
+    ev.check("F9 每张卡片标出组里最像它的那一位",
+             by_id["CAT-001"]["visual_peer"] == "CAT-002"
+             and by_id["CAT-002"]["visual_peer"] == "CAT-001"
+             and by_id["CAT-001"]["visual"] >= 0.8,
+             f"甲↔乙 互为最像，视觉 {by_id['CAT-001']['visual']:.1%}"
+             f"（同一张图重压过仍认得出）；组内最高 {g['visual_top']:.1%}")
+    ev.check("F9 视觉分不掺进可疑度（判定仍然是人的事）",
+             g["kind"] == "coat-area" and g["score"] == 0.9,
+             f"可疑度仍是 {g['score']}（0.35 + 0.55 × 特征描述相似度 100%），"
+             f"与视觉分 {g['visual_top']:.0%} 各算各的")
+    ev.check("F9 纯色照片拿不到指纹，沉到最后而不是发个假 100%",
+             g["visual_hashed"] == 3 and by_id["CAT-004"]["visual"] == 0.0
+             and j["stats"]["hashed_groups"] == 1,
+             f"丁的照片纯色无结构 → 不算指纹，4 只里 {g['visual_hashed']} 只参与排序；"
+             f"stats.hashed_groups {j['stats']['hashed_groups']}")
+
+
 def run_flow(client: TestClient, ev: Evidence, *, school: str, subtitle: str,
              roster_text: str, photos: list[tuple[str, bytes]], expect_cats: int,
              forms: tuple[str, ...] = ("relative", "inline")) -> str:
@@ -534,6 +640,7 @@ def run_flow(client: TestClient, ev: Evidence, *, school: str, subtitle: str,
     verify_calib(client, ev, pid, expect_cats)
     verify_theme(client, ev, pid, forms)
     verify_roster_rows(client, ev, pid, expect_cats)
+    verify_merge_visual(client, ev)
 
     r = client.post(f"/api/projects/{pid}/summary")
     md = r.json().get("markdown", "")

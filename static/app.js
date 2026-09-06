@@ -672,6 +672,11 @@ async function scanMerge() {
     $("#mergeState").innerHTML =
       `候选 <b>${s.groups}</b> 组 / ${s.members} 行 ｜ 已判定 <b>${s.decided}</b>` +
       `（同猫 ${s.same} · 不同 ${s.different} · 存疑 ${s.unsure}）｜ 待判定 ${s.pending}` +
+      (s.groups
+        ? ` ｜ 视觉排序 <b>${s.hashed_groups}</b>/${s.groups} 组` +
+          (s.hashed_groups < s.groups
+            ? `<span style="color:var(--gold)">（其余组缺照片或图坏了，排不出先后）</span>` : "")
+        : "") +
       (s.stale_gids.length
         ? ` ｜ <span style="color:var(--gold)">名册已改动，${s.stale_gids.length} 条旧判定失效</span>` : "");
     renderMerge(j.groups);
@@ -695,10 +700,13 @@ function renderMerge(groups) {
       <div class="mgHead">
         <b>${g.kind === "same-photo" ? "共用照片" : "同色同区"}</b>
         <span class="score">可疑度 ${(g.score * 100).toFixed(0)}%</span>
+        ${g.visual_hashed >= 2
+          ? `<span class="score vis">视觉最高 ${(g.visual_top * 100).toFixed(0)}%</span>` : ""}
         <code class="cd">${escapeHtml(g.gid)}</code>
         ${d ? `<span class="lv info">已判定：${verdictLabel(d.verdict)}</span>` : ""}
       </div>
-      <div class="mgWhy">${escapeHtml(g.reason)}</div>
+      <div class="mgWhy">${escapeHtml(g.reason)}${g.visual_hashed >= 2
+        ? " ｜ 卡片按视觉相似度排序，从左边第一对看起" : ""}</div>
       <div class="mgCards">${g.members.map((m) => `
         <div class="mcard">
           ${m.photo_url
@@ -709,6 +717,11 @@ function renderMerge(groups) {
             <div>${escapeHtml(m.coat || "毛色未记")} ｜ ${escapeHtml(m.area || "区域未填")}</div>
             <div class="feat">${escapeHtml(m.features || "无特征描述")}</div>
             <div class="meta">置信度 ${escapeHtml(m.confidence || "—")} ｜ 照片 ${m.photo_count || 0} 张 ｜ 第 ${m.line} 行</div>
+            <div class="meta vis">${m.visual > 0
+              ? `视觉相似度 <b>${(m.visual * 100).toFixed(0)}%</b> · 最像 ${escapeHtml(m.visual_peer)}`
+              : `视觉相似度 —（${!m.photo ? "名册没填照片"
+                                 : !m.photo_url ? `名册写了 ${escapeHtml(m.photo)}，但文件没上传`
+                                 : "这张图解不开"}，排不出先后）`}</div>
             <label class="pick"><input type="radio" name="keep-${escapeHtml(g.gid)}" value="${escapeHtml(m.id)}"
               ${d && d.keep === m.id ? "checked" : ""}> 判同猫时保留这只</label>
             <label class="pick"><input type="checkbox" name="drop-${escapeHtml(g.gid)}" value="${escapeHtml(m.id)}"

@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from . import (census_parser, image_proc, injector, locking, merge, packager,
-               progress, store, summary_writer)
+               phash, progress, store, summary_writer)
 from .config import (IMAGE_EXTS, LOGO_EXTS, MAX_LOGO_UPLOAD_BYTES,
                      MAX_PHOTOS_PER_PROJECT, MAX_PHOTOS_PER_UPLOAD, MAX_UPLOAD_BYTES,
                      ROSTER_COLUMNS, WORKSPACE, atomic_write_bytes, atomic_write_text,
@@ -159,6 +159,29 @@ def _photo_reader(pid: str):
         return retry_read_bytes(d / name)
 
     return read
+
+
+def _photo_hasher(pid: str):
+    """「代表照片名 → 感知哈希」的回调，给 F9 视觉预排序用。
+
+    目录只列一次、同名只解码一次：same-photo 组里两行共用一张照片正是最常见的
+    重复建档，不该为它把同一个文件解两遍。名字匹配规则和 `_photo_url` 一致
+    （取 basename、忽略大小写）；文件不在或解不开就返回 None，排序时自然沉底。
+    """
+    by_lower = {p.name.lower(): p for p in store.photo_files(pid)}
+    cache: dict[str, int | None] = {}
+
+    def hash_of(name: str) -> int | None:
+        base = (name or "").strip().replace("\\", "/").split("/")[-1]
+        if not base:
+            return None
+        key = base.lower()
+        if key not in cache:
+            p = by_lower.get(key)
+            cache[key] = phash.dhash_file(p) if p else None
+        return cache[key]
+
+    return hash_of
 
 
 def _inline_reader(pid: str, map_bytes: bytes):
@@ -866,12 +889,18 @@ def delete_logo(pid: str) -> dict:
 
 @app.get("/api/projects/{pid}/merge")
 def get_merge(pid: str) -> dict:
-    """疑似重复建档的候选组 + 已有判定，供工作台左右并排看图。"""
+    """疑似重复建档的候选组 + 已有判定，供工作台左右并排看图。
+
+    组内成员按「长得像不像」排过序，每张卡片还标着组里最像它的那一位——人从左边
+    第一对看起就行，不用把组内两两都比一遍。
+    """
     meta = _meta_or_404(pid)
     report = _load_report(pid) or _run_validation(meta)
     groups = merge.candidate_groups(report.rows)
     book = store.load_merge(pid)
+    hash_of = _photo_hasher(pid)
     for g in groups:
+        merge.annotate_visual(g, hash_of)
         d = book.decisions.get(g["gid"])
         g["decision"] = d.model_dump() if d else None
         for m in g["members"]:
@@ -883,6 +912,7 @@ def get_merge(pid: str) -> dict:
         "stats": {
             "groups": len(groups),
             "members": sum(len(g["members"]) for g in groups),
+            "hashed_groups": sum(1 for g in groups if g["visual_hashed"] >= 2),
             "decided": len(verdicts),
             "pending": len(groups) - len(verdicts),
             "same": verdicts.count("same"),
