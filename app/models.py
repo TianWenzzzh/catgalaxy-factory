@@ -147,6 +147,19 @@ class RosterPatch(BaseModel):
     revalidate: bool = True
 
 
+class RosterRowInsert(BaseModel):
+    """F10 · 在名册里插一行。`after` 是 CSV 物理行号（表头为第 1 行），新行落在它后面。
+
+    `values` 只填用户碰过的列，其余留空。**不替用户编编号**：编号留空就是留空，
+    由校验报 E_BAD_ID / E_DUP_ID，人来决定——工具自动补号会让「弃用编号不复用」
+    这条数据红线悄悄失效。
+    """
+
+    after: int
+    values: dict[str, str] = Field(default_factory=dict)
+    revalidate: bool = True
+
+
 class ThemeUpdateRequest(BaseModel):
     """F11 · 主题改动。留 None 表示「这项不动」，前端只发用户碰过的字段。
 

@@ -30,7 +30,7 @@ from .image_proc import generate_default_map
 from .injector import render_starmap
 from .models import (CalibData, CalibPoint, CalibUpdateRequest, CreateProjectRequest,
                      GenerateRequest, MergeDecision, MergeDecisionRequest, ProjectMeta,
-                     RosterPatch, ThemeUpdateRequest, ValidationReport)
+                     RosterPatch, RosterRowInsert, ThemeUpdateRequest, ValidationReport)
 # 按名字导入而不是 `from . import theme`：generate_bundle 里有个局部变量就叫
 # theme，模块名被它遮住之后想在同一个函数里调 theme.css_block 就会莫名其妙地炸。
 from .theme import (DEFAULT_PRESET, MAX_SIGNATURE, Theme, color_menu, font_menu,
@@ -952,6 +952,26 @@ def get_roster(pid: str) -> dict:
             "report": report.model_dump() if report else None}
 
 
+def _read_roster_rows(p: Path) -> list[list[str]]:
+    text, _enc = decode_bytes(retry_read_bytes(p))
+    return [r for r in csv.reader(io.StringIO(text))]
+
+
+def _save_roster(pid: str, meta: ProjectMeta, raw: list[list[str]],
+                 action: str, detail: str) -> None:
+    """名册的唯一落盘出口：两份拷贝一起原子换，BOM 与 LF 都由这里保证。
+
+    改单元格、增行、删行走同一个出口，才不会出现「roster.csv 改了、随包的
+    data/猫咪名册.csv 还是旧的」这种半新半旧的交付物。
+    """
+    buf = io.StringIO()
+    csv.writer(buf, lineterminator="\n").writerows(raw)
+    data = buf.getvalue().encode("utf-8-sig")
+    atomic_write_bytes(store.project_dir(pid) / "roster.csv", data)
+    atomic_write_bytes(store.project_dir(pid) / "data" / "猫咪名册.csv", data)
+    store.log(meta, action, detail)
+
+
 @app.patch("/api/projects/{pid}/roster", dependencies=[_GUARD])
 def patch_roster(pid: str, req: RosterPatch) -> dict:
     """按「物理行号 + 标准列名」改单元格，回写 CSV 并自动重跑校验。"""
@@ -962,8 +982,7 @@ def patch_roster(pid: str, req: RosterPatch) -> dict:
     if not req.edits:
         raise HTTPException(400, "没有要应用的改动")
 
-    text, _enc = decode_bytes(retry_read_bytes(p))
-    raw = [r for r in csv.reader(io.StringIO(text))]
+    raw = _read_roster_rows(p)
     if not raw:
         raise HTTPException(400, "名册为空，无从修改")
     mapping, _missing, _unknown = build_column_map(raw[0])
@@ -989,18 +1008,81 @@ def patch_roster(pid: str, req: RosterPatch) -> dict:
 
     report = None
     if applied:
-        buf = io.StringIO()
-        csv.writer(buf, lineterminator="\n").writerows(raw)
-        data = buf.getvalue().encode("utf-8-sig")
-        atomic_write_bytes(p, data)
-        atomic_write_bytes(store.project_dir(pid) / "data" / "猫咪名册.csv", data)
-        store.log(meta, "在线编辑名册",
-                  f"改动 {len(applied)} 处，拒绝 {len(rejected)} 处："
-                  + "；".join(f"行{a['line']}·{a['field']}" for a in applied[:6]))
+        _save_roster(pid, meta, raw, "在线编辑名册",
+                     f"改动 {len(applied)} 处，拒绝 {len(rejected)} 处："
+                     + "；".join(f"行{a['line']}·{a['field']}" for a in applied[:6]))
         if req.revalidate:
             report = _run_validation(meta)
 
     return {"applied": applied, "rejected": rejected,
+            "report": report.model_dump() if report else None}
+
+
+@app.post("/api/projects/{pid}/roster/rows", dependencies=[_GUARD])
+def insert_roster_row(pid: str, req: RosterRowInsert) -> dict:
+    """在第 `after` 行之后插一行（表头是第 1 行，所以 after=1 就是插到最前面）。
+
+    没给的列留空；名册里没有的列进 `ignored`，但行照样插——用户想加的猫
+    不该因为一个手滑的列名就加不进来。
+    """
+    meta = _meta_or_404(pid)
+    p = store.project_dir(pid) / "roster.csv"
+    if not p.exists():
+        raise HTTPException(404, "尚未上传名册 CSV")
+    raw = _read_roster_rows(p)
+    if not raw:
+        raise HTTPException(400, "名册为空，无从插入")
+    if req.after < 1 or req.after > len(raw):
+        raise HTTPException(400, f"行号越界（名册只有 {len(raw)} 行，表头是第 1 行，"
+                                 f"after 要在 1~{len(raw)} 之间）")
+    mapping, _missing, _unknown = build_column_map(raw[0])
+
+    width = max([len(raw[0])] + [i + 1 for i in mapping.values()])
+    row = [""] * width
+    ignored: list[dict] = []
+    for field, value in req.values.items():
+        if field not in mapping:
+            ignored.append({"field": field, "why": f"名册没有「{field}」这一列"})
+            continue
+        row[mapping[field]] = (value or "").strip()
+    raw.insert(req.after, row)
+
+    id_idx = mapping.get("编号")
+    label = row[id_idx].strip() if id_idx is not None else ""
+    _save_roster(pid, meta, raw, "名册增行",
+                 f"在第 {req.after} 行后插入新行（编号 {label or '未填'}，"
+                 f"填了 {len(req.values) - len(ignored)} 列，忽略 {len(ignored)} 列）")
+    report = _run_validation(meta) if req.revalidate else None
+    return {"line": req.after + 1, "row": row, "ignored": ignored,
+            "report": report.model_dump() if report else None}
+
+
+@app.delete("/api/projects/{pid}/roster/rows/{line}", dependencies=[_GUARD])
+def delete_roster_row(pid: str, line: int, revalidate: bool = True) -> dict:
+    """删掉一个物理行。表头（第 1 行）不许删——删了名册就不是名册了。
+
+    只删名册里这一行，**不动已入库的照片**：那只猫的代表照片会变成
+    「未使用照片」提示，这是事实，不该由删除动作顺手抹掉。
+    """
+    meta = _meta_or_404(pid)
+    p = store.project_dir(pid) / "roster.csv"
+    if not p.exists():
+        raise HTTPException(404, "尚未上传名册 CSV")
+    raw = _read_roster_rows(p)
+    if not raw:
+        raise HTTPException(400, "名册为空，无从删除")
+    if line < 2 or line > len(raw):
+        raise HTTPException(400, f"行号越界（名册只有 {len(raw)} 行，表头是第 1 行，"
+                                 f"可删范围是 2~{len(raw)}）")
+    mapping, _missing, _unknown = build_column_map(raw[0])
+    removed = raw.pop(line - 1)
+
+    id_idx = mapping.get("编号")
+    label = removed[id_idx].strip() if id_idx is not None and len(removed) > id_idx else ""
+    _save_roster(pid, meta, raw, "名册删行",
+                 f"删除第 {line} 行（编号 {label or '空缺'}），名册余 {len(raw) - 1} 行数据")
+    report = _run_validation(meta) if revalidate else None
+    return {"deleted": {"line": line, "row": removed},
             "report": report.model_dump() if report else None}
 
 

@@ -202,6 +202,32 @@ code.cd{font-family:ui-monospace,Consolas,monospace;font-size:10px;color:#93a6d6
 .erField input{margin-top:3px;padding:5px 8px;font-size:11.5px;border-radius:8px}
 .erField input.dirty{border-color:rgba(255,215,106,.55);background:rgba(255,215,106,.07)}
 
+/* 删这行：靠到 .erHead 最右侧，跟行号、等级标签隔开，免得误点 */
+.delRow{margin-left:auto;padding:2px 9px;font-size:10.5px;border-radius:999px;
+  border:1px solid rgba(255,140,140,.32);background:rgba(255,110,110,.09);color:#ffb4b4}
+.delRow:hover:not(:disabled){border-color:rgba(255,140,140,.7);color:#ffd0d0;
+  background:rgba(255,110,110,.18);transform:none}
+
+/* 加一只猫：这里不写 display，显隐全靠 hidden 属性（写了 display 会盖掉 hidden） */
+.addRowBox{margin-top:9px;padding:10px 12px;border-radius:11px;
+  border:1px solid rgba(125,232,216,.28);background:rgba(8,22,26,.5)}
+.addRowFields{margin:8px 0 2px}
+.addRowBox .erField input{width:190px}
+.addRowBox input[type=number]{width:96px}
+
+/* 删一行：同样不写 display，显隐靠 hidden 属性 */
+.delRowBox{margin-top:9px;padding:10px 12px;border-radius:11px;
+  border:1px solid rgba(255,142,162,.28);background:rgba(24,10,16,.5)}
+.delRowBox .erField{display:block;min-width:0;margin-bottom:6px}
+.delRowBox select{max-width:420px}
+
+button.danger{border-color:rgba(255,142,162,.34);background:rgba(255,110,130,.1);color:#ffb9c2}
+button.danger:hover:not(:disabled){border-color:rgba(255,142,162,.75);color:#ffd7dc;
+  background:rgba(255,110,130,.2)}
+
+.hint.ok{color:var(--teal)}
+.hint.err{color:var(--red)}
+
 ::-webkit-scrollbar{width:9px;height:9px}
 ::-webkit-scrollbar-thumb{background:rgba(140,170,255,.2);border-radius:9px}
 ::-webkit-scrollbar-thumb:hover{background:rgba(255,215,106,.34)}

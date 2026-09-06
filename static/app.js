@@ -806,7 +806,9 @@ function renderEditList(j) {
     const fields = hit.length ? hit : j.editable_columns;
     return `<div class="editRow">
       <div class="erHead">第 ${ln} 行 · <code class="cd">${escapeHtml(row[0] || "(编号空)")}</code>
-        ${its.map((i) => `<span class="lv ${i.level}">${i.code}</span>`).join(" ")}</div>
+        ${its.map((i) => `<span class="lv ${i.level}">${i.code}</span>`).join(" ")}
+        <button type="button" class="delRow" data-del="${ln}"
+                title="只删名册里这一行，照片不动（会变成「未使用照片」提示）">✕ 删这行</button></div>
       <div class="erMsg">${its.map((i) => escapeHtml(i.message)).join("<br>")}</div>
       ${fields.map((f) => {
         const cur = row[j.mapping[f]];
@@ -823,6 +825,35 @@ function renderEditList(j) {
     inp.classList.add("dirty");
     updateApplyBtn();
   }));
+
+  /* 删一行会让它下面所有行的物理行号往上挪一格，待改里记的行号立刻全部作废，
+     所以删完必须丢掉 pending 并向服务端重读名册，不能拿本地这份旧行号继续用。 */
+  box.querySelectorAll("[data-del]").forEach((btn) => btn.addEventListener("click", async () => {
+    const ln = +btn.dataset.del;
+    const row = j.rows[ln - j.line_offset] || [];
+    const who = (row[0] || "").trim() || "(编号空)";
+    if (!confirm(`删除第 ${ln} 行（编号 ${who}）？\n\n只删名册里这一行；照片文件不动，` +
+                 `之后会以「未使用照片」提示出现在报告里。`)) return;
+    btn.disabled = true;
+    try { await deleteRosterRow(ln, who); }
+    catch (e) { btn.disabled = false; toast("删除失败：" + e.message, "err"); }
+  }));
+}
+
+/* 两个删除入口（问题行右侧的「✕ 删这行」、工具条上按编号挑的「－ 删一行」）
+   共用这一趟往返：删完名册行号全变，报告、编辑列表、F8 标定、F9 归并都得跟着刷新。 */
+async function deleteRosterRow(ln, who) {
+  const r = await api(`/api/projects/${state.pid}/roster/rows/${ln}`, { method: "DELETE" });
+  pending.clear(); updateApplyBtn();
+  if (r.report) { state.report = r.report; renderReport(r.report); }
+  await reloadRoster();
+  const unused = r.report
+    ? r.report.issues.filter((i) => i.code === "I_PHOTO_UNUSED").length : 0;
+  toast(`已删除第 ${ln} 行（${who}），错误剩 ${r.report ? r.report.summary.error_count : "—"}` +
+        (unused ? ` ｜ 未使用照片 ${unused} 张（文件没删，要不要清由你定）` : ""), "ok");
+  await refreshCalib();
+  if (state.mergeLoaded) await scanMerge();
+  return r;
 }
 
 $("#btnRosterEdit").addEventListener("click", async () => {
@@ -843,7 +874,8 @@ $("#btnApplyEdits").addEventListener("click", async () => {
       body: JSON.stringify({ edits: [...pending.values()] }),
     });
     pending.clear(); updateApplyBtn();
-    if (r.report) { state.report = r.report; renderReport(r.report); renderEditList(state.roster); }
+    if (r.report) { state.report = r.report; renderReport(r.report); }
+    await reloadRoster();          // 重读名册：摊开的行得显示改完的值，不是改前那份快照
     const rej = r.rejected || [];
     toast(`已应用 ${r.applied.length} 处改动，错误剩 ${r.report ? r.report.summary.error_count : "—"}` +
           (rej.length ? ` ｜ ${rej.length} 处被拒：${rej[0].why}` : ""), rej.length ? "err" : "ok");
@@ -856,6 +888,166 @@ $("#btnClearEdits").addEventListener("click", () => {
   pending.clear(); updateApplyBtn();
   $$("#editList input").forEach((i) => i.classList.remove("dirty"));
   toast("已清空待改（名册文件未动）", "");
+});
+
+/* ---------- F10 增行 / 删行 ---------- */
+
+async function reloadRoster() {
+  const j = await api(`/api/projects/${state.pid}/roster`);
+  state.roster = j;
+  renderEditList(j);
+  return j;
+}
+
+function openAddRow() {
+  const j = state.roster;
+  const last = j.rows.length + 1;              // 物理行数 = 数据行 + 表头（第 1 行）
+  const after = $("#addRowAfter");
+  after.max = String(last);
+  after.value = String(last);                  // 默认追加到末尾，这是最常做的动作
+  $("#addRowFields").innerHTML = j.editable_columns.map((f) =>
+    `<label class="erField">${escapeHtml(f)}<input data-new="${escapeHtml(f)}" value=""></label>`).join("");
+  $("#addRowState").textContent =
+    `名册共 ${last} 行（表头是第 1 行），可插在 1~${last} 之后` +
+    (j.missing_columns && j.missing_columns.length ? `；名册缺列：${j.missing_columns.join("、")}` : "");
+  $("#addRowState").className = "hint";
+  $("#addRowBox").hidden = false;
+  $("#btnAddRow").disabled = true;
+}
+
+function closeAddRow() {
+  $("#addRowBox").hidden = true;
+  $("#btnAddRow").disabled = false;
+  $("#addRowState").textContent = "";
+}
+
+$("#btnAddRow").addEventListener("click", async () => {
+  if (!needPid()) return;
+  if (!state.roster) {
+    try { await reloadRoster(); }
+    catch (e) { toast("加不了：" + e.message, "err"); return; }
+  }
+  openAddRow();
+});
+
+$("#btnAddRowCancel").addEventListener("click", () => {
+  $$("#addRowFields input").forEach((i) => { i.value = ""; });
+  closeAddRow();
+});
+
+$("#btnAddRowGo").addEventListener("click", async () => {
+  if (!needPid() || !state.roster) return;
+  const after = parseInt($("#addRowAfter").value, 10);
+  if (!Number.isFinite(after) || after < 1) {
+    toast("「插在第几行之后」要填一个 ≥1 的行号（表头是第 1 行）", "err"); return;
+  }
+  /* 空着的列根本不发出去：编号留空就该留空，让校验报「编号为空」由人来定号，
+     前端替用户编一个号会让「弃用编号不复用」这条数据红线悄悄失效。 */
+  const values = {};
+  $$("#addRowFields input[data-new]").forEach((inp) => {
+    const v = inp.value.trim();
+    if (v) values[inp.dataset.new] = v;
+  });
+  if (!Object.keys(values).length) {
+    toast("一行都没填 —— 至少给「昵称」「毛色」「代表照片文件」一个值", "err"); return;
+  }
+  $("#btnAddRowGo").disabled = true;
+  $("#addRowState").textContent = "插入中…";
+  try {
+    const r = await api(`/api/projects/${state.pid}/roster/rows`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ after, values }),
+    });
+    pending.clear(); updateApplyBtn();
+    if (r.report) { state.report = r.report; renderReport(r.report); }
+    const j = await reloadRoster();
+    const idIdx = j.mapping["编号"];
+    const who = idIdx === undefined ? "" : String(r.row[idIdx] || "").trim();
+    openAddRow();                              // 表单留着，方便连着加下一只
+    const ign = r.ignored || [];
+    $("#addRowState").textContent = ign.length
+      ? `已插入第 ${r.line} 行；${ign.length} 列名册里没有，被忽略：${ign.map((x) => x.field).join("、")}`
+      : `已插入第 ${r.line} 行${who ? `（编号 ${who}）` : "（编号未填，校验会报错）"}`;
+    $("#addRowState").className = "hint " + (ign.length ? "err" : "ok");
+    toast(`新猫已加在第 ${r.line} 行` +
+          `，错误剩 ${r.report ? r.report.summary.error_count : "—"}`, "ok");
+    await refreshCalib();
+    if (state.mergeLoaded) await scanMerge();
+  } catch (e) {
+    $("#addRowState").textContent = "插入失败：" + e.message;
+    $("#addRowState").className = "hint err";
+    toast("插入失败：" + e.message, "err");
+  } finally {
+    $("#btnAddRowGo").disabled = false;
+  }
+});
+
+/* 名册干净时 renderEditList 一个 data-del 都不渲染，所以还得有个不挑行的删除入口：
+   最常删的恰恰是「没毛病但这只猫不再出现了」的行。选项列全部数据行，按编号认猫。 */
+function openDelRow() {
+  const j = state.roster;
+  const idIdx = j.mapping["编号"], nameIdx = j.mapping["昵称"];
+  $("#delRowPick").innerHTML = j.rows.map((row, i) => {
+    const ln = i + j.line_offset;                  // 物理行号 = 数据行下标 + line_offset
+    const id = idIdx === undefined ? "" : String(row[idIdx] || "").trim();
+    const nm = nameIdx === undefined ? "" : String(row[nameIdx] || "").trim();
+    return `<option value="${ln}">第 ${ln} 行 · ${escapeHtml(id || "(编号空)")} ${escapeHtml(nm)}</option>`;
+  }).join("");
+  $("#delRowState").textContent =
+    `名册共 ${j.rows.length} 行数据（表头是第 1 行，不可删）`;
+  $("#delRowState").className = "hint";
+  $("#delRowBox").hidden = false;
+  $("#btnDelRow").disabled = true;
+}
+
+function closeDelRow() {
+  $("#delRowBox").hidden = true;
+  $("#btnDelRow").disabled = false;
+}
+
+$("#btnDelRow").addEventListener("click", async () => {
+  if (!needPid()) return;
+  if (!state.roster) {
+    try { await reloadRoster(); }
+    catch (e) { toast("删不了：" + e.message, "err"); return; }
+  }
+  if (!state.roster.rows.length) { toast("名册里没有数据行可删", "err"); return; }
+  openDelRow();
+});
+
+$("#btnDelRowCancel").addEventListener("click", closeDelRow);
+
+$("#btnDelRowGo").addEventListener("click", async () => {
+  if (!needPid() || !state.roster) return;
+  const sel = $("#delRowPick");
+  const ln = parseInt(sel.value, 10);
+  if (!Number.isFinite(ln) || ln < 2) {
+    toast("请挑一个数据行（表头是第 1 行，不能删）", "err"); return;
+  }
+  const label = sel.options[sel.selectedIndex].textContent.trim();
+  if (!confirm(`删除「${label}」？\n\n只删名册里这一行；照片文件不动，` +
+               `之后会以「未使用照片」提示出现在报告里。`)) return;
+  /* toast 里已经带了「第 N 行」，这里只给认猫用的编号/昵称；直接拿选项文字，
+     行号会在同一句话里出现两遍。 */
+  const row = state.roster.rows[ln - state.roster.line_offset] || [];
+  const at = (f) => { const i = state.roster.mapping[f]; return i === undefined ? "" : String(row[i] || "").trim(); };
+  const who = at("编号") || at("昵称") || "(编号空)";
+  $("#btnDelRowGo").disabled = true;
+  $("#delRowState").textContent = "删除中…";
+  try {
+    await deleteRosterRow(ln, who);
+    closeDelRow();
+    if (state.roster.rows.length) openDelRow();     // 还有行就把下拉留着，方便连着删
+    $("#delRowState").textContent =
+      `已删除「${who}」，名册余 ${state.roster.rows.length} 行数据`;
+    $("#delRowState").className = "hint ok";
+  } catch (e) {
+    $("#delRowState").textContent = "删除失败：" + e.message;
+    $("#delRowState").className = "hint err";
+    toast("删除失败：" + e.message, "err");
+  } finally {
+    $("#btnDelRowGo").disabled = false;
+  }
 });
 
 /* ---------- F11 星图主题 ---------- */

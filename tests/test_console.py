@@ -70,6 +70,65 @@ def test_theme_panel_is_reloaded_when_a_project_is_opened():
     assert JS.count("await loadTheme()") >= 2, "创建项目和打开项目两处都该调 loadTheme()"
 
 
+def test_roster_row_controls_are_present_and_wired():
+    """F10 增行表单的每个控件都要有人管，否则面板上摆着一排不动的输入框。"""
+    for pid in ("btnAddRow", "addRowBox", "addRowAfter", "addRowFields",
+                "btnAddRowGo", "btnAddRowCancel", "addRowState"):
+        assert pid in ALL_IDS, f"index.html 缺 #{pid}"
+        assert f"#{pid}" in JS, f"#{pid} 在 app.js 里没人管"
+
+
+def test_delete_row_entry_is_rendered_per_problem_row():
+    """每个问题行都要有「删这行」的入口，且带上物理行号。"""
+    assert "data-del=" in JS, "renderEditList 没给问题行渲染删除按钮"
+    assert "删这行" in JS
+
+
+def test_delete_row_controls_are_present_and_wired():
+    """删除入口不能只挂在「问题行」上。
+
+    名册干净时 renderEditList 一句「无需在线修改」就收工，一个 data-del 都不渲染
+    （浏览器里实测过：editList 只有那句空提示）。可现实里最常删的恰恰是没毛病的行
+    ——某只猫不再出现了。只有问题行能删，用户就得先把一行改坏才删得掉。
+    """
+    for pid in ("btnDelRow", "delRowBox", "delRowPick", "btnDelRowGo",
+                "btnDelRowCancel", "delRowState"):
+        assert pid in ALL_IDS, f"index.html 缺 #{pid}"
+        assert f"#{pid}" in JS, f"#{pid} 在 app.js 里没人管"
+
+
+def test_delete_row_picker_lists_every_row_not_just_problem_rows():
+    """下拉要按物理行号列全部行；行号靠 line_offset 换算，别在前端另算一套。"""
+    m = re.search(r"function openDelRow\(\)\s*\{(.*?)\n\}", JS, re.S)
+    assert m, "app.js 里没有 openDelRow()"
+    for token in ("delRowPick", "rows", "line_offset"):
+        assert token in m.group(1), \
+            f"openDelRow 该用 state.roster.rows + line_offset 生成选项，缺 {token}"
+
+
+def test_apply_edits_rereads_the_roster_instead_of_repainting_stale_rows():
+    """应用改动后必须向服务端重读名册，不能拿改动前那份 state.roster 重画。
+
+    浏览器里实测到的现象：给新增行填上编号 CAT-003、点「应用改动」，报告已经转绿，
+    可摊开的那一行标题还写着「(编号空)」——用户会以为自己的改动没生效。
+    """
+    m = re.search(r"""\$\("#btnApplyEdits"\)\.addEventListener\("click",(.*?)\n\}\);""", JS, re.S)
+    assert m, "app.js 里没有 #btnApplyEdits 的点击处理"
+    body = m.group(1)
+    assert "reloadRoster()" in body, "应用改动后没有重读名册"
+    assert "renderEditList(state.roster)" not in body, \
+        "还在拿改动前的 state.roster 重画编辑列表（行里的值是旧的）"
+
+
+def test_console_never_fabricates_a_cat_id():
+    """编号由人定（弃用编号不复用是数据红线）。
+
+    后端刻意不补号，前端也不能自作聪明拼一个 CAT-NNN 填进新增行——那样这条红线
+    就在没人看得见的地方失效了。
+    """
+    assert "CAT-" not in JS, "app.js 里出现了写死或拼出来的 CAT- 编号"
+
+
 # ---------- 路由接线 ----------
 
 def canon(path: str) -> str:
@@ -94,6 +153,18 @@ def test_theme_endpoints_offer_the_methods_the_console_uses(routes):
         "/api/theme/options": ["get"],
         "/api/projects/{}/theme": ["get", "put", "delete"],
         "/api/projects/{}/logo": ["get", "post", "delete"],
+    }
+    for path, methods in expect.items():
+        assert path in by_canon, f"缺路由 {path}"
+        for m in methods:
+            assert m in by_canon[path], f"{path} 没有 {m.upper()}"
+
+
+def test_roster_row_endpoints_offer_the_methods_the_console_uses(routes):
+    by_canon = {canon(p): v for p, v in routes.items()}
+    expect = {
+        "/api/projects/{}/roster/rows": ["post"],
+        "/api/projects/{}/roster/rows/{}": ["delete"],
     }
     for path, methods in expect.items():
         assert path in by_canon, f"缺路由 {path}"

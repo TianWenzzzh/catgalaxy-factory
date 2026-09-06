@@ -135,9 +135,38 @@
             <button id="btnRosterEdit">✎ 在线修改名册（F10）</button>
             <button id="btnApplyEdits" class="primary" disabled>应用改动并重跑校验</button>
             <button id="btnClearEdits" disabled>清空待改</button>
+            <button id="btnAddRow">＋ 加一只猫</button>
+            <button id="btnDelRow" class="danger">－ 删一行</button>
           </div>
           <p class="hint">把有错误/警告的行直接摊开改，不用再「下载 CSV → 改 → 重新上传」绕一圈。
-            改动写回项目的 <code>roster.csv</code> 与 <code>data/猫咪名册.csv</code>（带 BOM，Excel 不乱码）。</p>
+            改动写回项目的 <code>roster.csv</code> 与 <code>data/猫咪名册.csv</code>（带 BOM，Excel 不乱码）。
+            删行有两个入口：问题行右侧的「✕ 删这行」，和上面「－ 删一行」里按编号挑
+            （名册干净时没有前者）。两者都只删名册里那一行，照片不动，会变成「未使用照片」提示。</p>
+          <span class="hint" id="addRowState"></span>
+          <div id="addRowBox" class="addRowBox" hidden>
+            <label class="erField">插在第几行之后（表头是第 1 行）
+              <input id="addRowAfter" type="number" min="1" step="1" value="1">
+            </label>
+            <div id="addRowFields" class="addRowFields"></div>
+            <div class="row">
+              <button id="btnAddRowGo" class="primary">插入并重跑校验</button>
+              <button id="btnAddRowCancel">取消</button>
+            </div>
+            <p class="hint">编号留空就是留空——工具不替你编编号，校验会报「编号为空」，
+              由你决定用哪个号（弃用编号不复用是数据红线）。</p>
+          </div>
+          <span class="hint" id="delRowState"></span>
+          <div id="delRowBox" class="delRowBox" hidden>
+            <label class="erField">删哪一行
+              <select id="delRowPick"></select>
+            </label>
+            <div class="row">
+              <button id="btnDelRowGo" class="danger">删除并重跑校验</button>
+              <button id="btnDelRowCancel">取消</button>
+            </div>
+            <p class="hint">表头（第 1 行）不能删。删掉的猫会从星图里消失，但它的照片仍留在工作区，
+              报告里会以「未使用照片」提示——要不要清掉由你决定，工具不替你删文件。</p>
+          </div>
           <div id="editList" class="editlist"></div>
         </div>
       </div>

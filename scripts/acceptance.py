@@ -384,6 +384,79 @@ def verify_theme(client: TestClient, ev: Evidence, pid: str,
              "预设回到默认、校徽已删，产物里不再多出主题 <style> 与徽章标签")
 
 
+def verify_roster_rows(client: TestClient, ev: Evidence, pid: str, n_cats: int) -> None:
+    """F10 增行/删行：加一只猫再删掉，名册回到原样，照片留在工作区。
+
+    两处刻意不自动化的地方，都要在这里留下实测证据：
+      · 插入时编号留空就是留空 —— 工具替用户补号会让「弃用编号不复用」这条数据
+        红线悄悄失效，所以这里先证明它报了 E_BAD_ID、再由人 PATCH 定号；
+      · 删行不删照片 —— 孤儿照片必须变成 I_PHOTO_UNUSED 浮到报告上，
+        而不是被工具一声不响地清掉。
+    """
+    j = client.get(f"/api/projects/{pid}/roster").json()
+    rows0, id_idx = len(j["rows"]), j["mapping"].get("编号")
+    used = []
+    for row in j["rows"]:
+        v = row[id_idx].strip() if id_idx is not None and len(row) > id_idx else ""
+        m = re.fullmatch(r"CAT-(\d+)", v)
+        if m:
+            used.append(int(m.group(1)))
+    new_id = f"CAT-{max(used, default=0) + 1:03d}"
+
+    photo_name = "验收-新增行.jpg"
+    r = client.post(f"/api/projects/{pid}/photos",
+                    files=[("files", (photo_name, make_photo(900, 700, 99), "image/jpeg"))])
+    n_photos, _ = photo_sizes_on_disk(pid)
+    ev.check("F10 为待新增的猫先传一张照片",
+             r.status_code == 200 and r.json()["saved"] == 1,
+             f"{photo_name} 入库 {r.json().get('saved')} 张，工作区共 {n_photos} 张")
+
+    r = client.post(f"/api/projects/{pid}/roster/rows", json={
+        "after": rows0 + 1,
+        "values": {"昵称": "验收猫", "毛色": "橘白", "代表照片文件": photo_name,
+                   "照片数量": "1", "出没区域": "验收脚本", "置信度": "高"},
+    })
+    j2 = r.json()
+    rep = j2["report"]
+    codes = sorted({i["code"] for i in rep["issues"] if i["line"] == j2["line"]})
+    ev.check("F10 增行不替用户编编号（编号留空就该报错）",
+             r.status_code == 200 and j2["line"] == rows0 + 2
+             and "E_BAD_ID" in codes and rep["summary"]["ok"] is False
+             and rep["summary"]["total_rows"] == rows0 + 1
+             and not j2["row"][id_idx].strip(),
+             f"新行落在第 {j2['line']} 行，数据行 {rows0} → {rep['summary']['total_rows']}；"
+             f"该行问题 {codes}；编号列实值「{j2['row'][id_idx]}」")
+
+    r = client.patch(f"/api/projects/{pid}/roster", json={
+        "edits": [{"line": j2["line"], "field": "编号", "value": new_id}]})
+    s = r.json()["report"]["summary"]
+    ev.check("F10 由人定号后校验转绿",
+             r.status_code == 200 and s["ok"] is True and s["error_count"] == 0,
+             f"编号 {new_id}（避开已用的 {len(used)} 个号），可入图 {s['valid_rows']} 行，"
+             f"错误 {s['error_count']} 警告 {s['warning_count']} 提示 {s['info_count']}")
+
+    d = client.post(f"/api/projects/{pid}/generate", json={"form": "relative"}).json()
+    ev.check("F10 新增的猫进了星图产物", d["cats"] == n_cats + 1,
+             f"CATS {d['cats']} 条（原 {n_cats} 条 + 新增 1 条），"
+             f"zip {d['zip_bytes'] // 1024}KB")
+
+    r = client.delete(f"/api/projects/{pid}/roster/rows/{j2['line']}")
+    jd = r.json()
+    s = jd["report"]["summary"]
+    unused = [i for i in jd["report"]["issues"] if i["code"] == "I_PHOTO_UNUSED"]
+    n_after, _ = photo_sizes_on_disk(pid)
+    ev.check("F10 删行：名册回到原样，照片留在工作区并报「未使用」",
+             r.status_code == 200 and s["total_rows"] == rows0 and s["ok"] is True
+             and n_after == n_photos and unused,
+             f"删掉第 {jd['deleted']['line']} 行（编号 {jd['deleted']['row'][id_idx]}），"
+             f"数据行 {rows0 + 1} → {s['total_rows']}；工作区照片 {n_after} 张未减少；"
+             f"I_PHOTO_UNUSED {len(unused)} 条：{unused[0]['message'][:60]}")
+
+    d = client.post(f"/api/projects/{pid}/generate", json={"form": "relative"}).json()
+    ev.check("F10 删掉的猫不再出现在星图里", d["cats"] == n_cats,
+             f"CATS 回到 {d['cats']} 条（期望 {n_cats}）")
+
+
 def run_flow(client: TestClient, ev: Evidence, *, school: str, subtitle: str,
              roster_text: str, photos: list[tuple[str, bytes]], expect_cats: int,
              forms: tuple[str, ...] = ("relative", "inline")) -> str:
@@ -460,6 +533,7 @@ def run_flow(client: TestClient, ev: Evidence, *, school: str, subtitle: str,
 
     verify_calib(client, ev, pid, expect_cats)
     verify_theme(client, ev, pid, forms)
+    verify_roster_rows(client, ev, pid, expect_cats)
 
     r = client.post(f"/api/projects/{pid}/summary")
     md = r.json().get("markdown", "")
