@@ -1,0 +1,428 @@
+"""喵星图工厂 · FastAPI 入口。"""
+from __future__ import annotations
+
+import json
+import shutil
+from datetime import date
+from pathlib import Path
+from typing import Optional
+from urllib.parse import quote
+
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
+
+from . import census_parser, image_proc, injector, packager, store, summary_writer
+from .config import IMAGE_EXTS, WORKSPACE, ensure_dirs
+from .csv_loader import decode_bytes, empty_template, parse_roster
+from .image_proc import generate_default_map
+from .injector import build_photo_chunks, render_starmap
+from .models import CreateProjectRequest, GenerateRequest, ProjectMeta, ValidationReport
+from .validate import passing_rows, report_markdown, validate
+
+app = FastAPI(title="喵星图工厂 CatGalaxy Factory", version="1.0.0")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
+                   allow_headers=["*"])
+
+WORKSPACE.mkdir(parents=True, exist_ok=True)
+
+
+# ---------- 内部工具 ----------
+
+def _meta_or_404(pid: str) -> ProjectMeta:
+    meta = store.load_meta(pid)
+    if not meta:
+        raise HTTPException(404, f"项目 {pid} 不存在")
+    return meta
+
+
+def _report_path(pid: str) -> Path:
+    return store.project_dir(pid) / "report.json"
+
+
+def _load_report(pid: str) -> Optional[ValidationReport]:
+    p = _report_path(pid)
+    if not p.exists():
+        return None
+    try:
+        return ValidationReport.model_validate(json.loads(p.read_text(encoding="utf-8")))
+    except Exception:
+        return None
+
+
+def _save_report(pid: str, report: ValidationReport) -> None:
+    _report_path(pid).write_text(
+        json.dumps(report.model_dump(), ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _run_validation(meta: ProjectMeta) -> ValidationReport:
+    roster = store.project_dir(meta.id) / "roster.csv"
+    if not roster.exists():
+        raise HTTPException(400, "尚未上传名册 CSV")
+    text, _enc = decode_bytes(roster.read_bytes())
+    rows, missing, unknown, _header = parse_roster(text)
+    report = validate(rows, store.photo_names(meta.id), missing_columns=missing,
+                      unknown_columns=unknown, school=meta.school, project_id=meta.id)
+    _save_report(meta.id, report)
+    return report
+
+
+def _ensure_map(pid: str) -> Path:
+    mp = store.map_path(pid)
+    if not mp.exists():
+        generate_default_map(mp)
+        meta = store.load_meta(pid)
+        if meta:
+            meta.has_map = True
+            store.save_meta(meta)
+    return mp
+
+
+def _photo_blobs(pid: str, names: Optional[set[str]] = None) -> dict[str, bytes]:
+    out: dict[str, bytes] = {}
+    for p in store.photo_files(pid):
+        if names is None or p.name in names or p.name.lower() in {n.lower() for n in names}:
+            out[p.name] = p.read_bytes()
+    return out
+
+
+def _bundle_dir(pid: str, form: str) -> Path:
+    return store.project_dir(pid) / "out" / form
+
+
+def generate_bundle(pid: str, form: str = "relative", *,
+                    exclude_low_confidence: bool = False,
+                    school: Optional[str] = None) -> dict:
+    """F3+F4+F5 的核心编排：渲染 HTML → 落盘 bundle → 打 zip。"""
+    if form not in ("relative", "inline"):
+        raise HTTPException(400, "form 只能是 relative 或 inline")
+
+    meta = _meta_or_404(pid)
+    if school:
+        meta.school = school
+    report = _load_report(pid) or _run_validation(meta)
+    if not report.summary.ok:
+        raise HTTPException(409, "校验未通过，请先修复名册错误")
+
+    rows = passing_rows(report, exclude_low_confidence=exclude_low_confidence)
+    if not rows:
+        raise HTTPException(409, "没有可入图的行（可能全部被排除）")
+
+    dirs = ensure_dirs(pid)
+    _ensure_map(pid)
+    map_bytes = store.map_path(pid).read_bytes()
+    html_name = packager.html_basename(meta.school)
+    dest = _bundle_dir(pid, form)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    referenced = {r.photo_file.strip().replace("\\", "/").split("/")[-1]
+                  for r in rows if r.photo_file.strip()}
+    photos = _photo_blobs(pid, referenced)
+    roster_csv = (store.project_dir(pid) / "roster.csv").read_text(encoding="utf-8",
+                                                                  errors="replace")
+    md = report_markdown(report)
+    (dirs["root"] / "校验报告.md").write_text(md, encoding="utf-8")
+    stats = injector.generation_stats(rows)
+    summary_md = summary_writer.build_summary(meta, report, stats)
+    (dirs["root"] / "归并决策摘要.md").write_text(summary_md, encoding="utf-8")
+
+    if form == "inline":
+        payload = dict(photos)
+        payload["map.jpg"] = map_bytes
+        chunks = build_photo_chunks(payload)
+        html = render_starmap(school=meta.school, subtitle=meta.subtitle, rows=rows,
+                              form=form, map_filename="assets/map.jpg",
+                              photo_script_names=[n for n, _ in chunks])
+        written = packager.build_inline_bundle(dest, html=html, html_name=html_name,
+                                               chunks=chunks, roster_csv=roster_csv,
+                                               report_md=md, summary_md=summary_md)
+    else:
+        html = render_starmap(school=meta.school, subtitle=meta.subtitle, rows=rows,
+                              form=form, map_filename="assets/map.jpg",
+                              photo_script_names=[])
+        written = packager.build_relative_bundle(dest, html=html, html_name=html_name,
+                                                 photos=photos, map_bytes=map_bytes,
+                                                 roster_csv=roster_csv, report_md=md,
+                                                 summary_md=summary_md)
+
+    zip_name = packager.zip_basename(meta.school)
+    zip_path = packager.make_zip(dest, dirs["dist"] / f"{zip_name}.zip")
+
+    meta.generated_form = form
+    meta.has_roster = True
+    meta.photo_count = len(store.photo_files(pid))
+    meta.has_map = True
+    store.log(meta, "生成星图",
+              f"form={form} cats={len(rows)} photos={len(photos)} "
+              f"exclude_low={exclude_low_confidence} zip={zip_path.name}")
+
+    missing_photos = sorted(referenced - set(photos))
+    return {
+        "project_id": pid,
+        "school": meta.school,
+        "form": form,
+        "cats": len(rows),
+        "photos_embedded": len(photos),
+        "missing_photos": missing_photos,
+        "files": written,
+        "stats": stats,
+        "html_name": html_name,
+        "preview_url": f"/bundle/{pid}/out/{form}/{quote(html_name)}",
+        "zip_name": zip_path.name,
+        "zip_bytes": zip_path.stat().st_size,
+        "bundle_bytes": packager.bundle_size(dest),
+        "generated_at": date.today().isoformat(),
+    }
+
+
+# ---------- 路由：项目 ----------
+
+@app.post("/api/projects")
+def create_project(req: CreateProjectRequest) -> dict:
+    meta = store.create_project(req.school, req.subtitle, req.motto)
+    return meta.model_dump()
+
+
+@app.get("/api/projects")
+def list_projects() -> list[dict]:
+    return [m.model_dump() for m in store.list_projects()]
+
+
+@app.get("/api/projects/{pid}")
+def get_project(pid: str) -> dict:
+    meta = _meta_or_404(pid)
+    report = _load_report(pid)
+    return {
+        "meta": meta.model_dump(),
+        "photos": [p.name for p in store.photo_files(pid)],
+        "report": report.model_dump() if report else None,
+        "has_map": store.map_path(pid).exists(),
+    }
+
+
+@app.delete("/api/projects/{pid}")
+def delete_project(pid: str) -> dict:
+    _meta_or_404(pid)
+    shutil.rmtree(store.project_dir(pid), ignore_errors=True)
+    return {"deleted": pid}
+
+
+# ---------- 路由：F1 数据导入 ----------
+
+@app.post("/api/projects/{pid}/roster")
+async def upload_roster(pid: str, file: UploadFile = File(...)) -> dict:
+    meta = _meta_or_404(pid)
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "上传的 CSV 为空")
+    text, enc = decode_bytes(data)
+    rows, missing, unknown, header = parse_roster(text)
+    dirs = ensure_dirs(pid)
+    (dirs["root"] / "roster.csv").write_bytes(data)
+    (dirs["data"] / "猫咪名册.csv").write_bytes(data)
+    meta.has_roster = True
+    store.log(meta, "上传名册", f"编码={enc} 行数={len(rows)} 缺列={missing or '无'}")
+
+    report = validate(rows, store.photo_names(pid), missing_columns=missing,
+                      unknown_columns=unknown, school=meta.school, project_id=pid)
+    _save_report(pid, report)
+    return {"encoding": enc, "rows": len(rows), "missing_columns": missing,
+            "unknown_columns": unknown, "report": report.model_dump()}
+
+
+@app.post("/api/projects/{pid}/photos")
+async def upload_photos(pid: str, files: list[UploadFile] = File(...)) -> dict:
+    meta = _meta_or_404(pid)
+    dirs = ensure_dirs(pid)
+    saved: list[dict] = []
+    skipped: list[str] = []
+    compressed_bytes = 0
+    src_bytes = 0
+
+    for f in files:
+        data = await f.read()
+        if not data:
+            skipped.append(f.filename or "(空文件)")
+            continue
+        name = f.filename or ""
+        if image_proc.is_zip(data):
+            for path, info in image_proc.extract_photo_zip(data, dirs["photos"]):
+                saved.append(info)
+                src_bytes += info["src_bytes"]
+                compressed_bytes += info["out_bytes"]
+            continue
+        if Path(name).suffix.lower() not in IMAGE_EXTS:
+            skipped.append(name or "(无扩展名)")
+            continue
+        _path, info = image_proc.process_and_save(data, dirs["photos"], name)
+        saved.append(info)
+        src_bytes += info["src_bytes"]
+        compressed_bytes += info["out_bytes"]
+
+    meta.photo_count = len(store.photo_files(pid))
+    store.log(meta, "上传照片",
+              f"张数={len(saved)} 跳过={len(skipped)} "
+              f"原始={src_bytes/1024:.0f}KB 压缩后={compressed_bytes/1024:.0f}KB")
+
+    report = None
+    if meta.has_roster:
+        report = _run_validation(meta)
+
+    return {"saved": len(saved), "skipped": skipped, "photos": sorted(store.photo_names(pid)),
+            "src_bytes": src_bytes, "out_bytes": compressed_bytes,
+            "max_side": max((s["width"] for s in saved), default=0) and
+                        max(max(s["width"], s["height"]) for s in saved) if saved else 0,
+            "report": report.model_dump() if report else None}
+
+
+@app.post("/api/projects/{pid}/map")
+async def upload_map(pid: str, file: UploadFile = File(...)) -> dict:
+    meta = _meta_or_404(pid)
+    data = await file.read()
+    if not image_proc.looks_like_image(data):
+        raise HTTPException(400, "底图不是有效图片")
+    mp = store.map_path(pid)
+    mp.parent.mkdir(parents=True, exist_ok=True)
+    from PIL import Image
+    import io
+    img = Image.open(io.BytesIO(data)).convert("RGB")
+    from .config import MAX_MAP_SIDE
+    if max(img.size) > MAX_MAP_SIDE:
+        s = MAX_MAP_SIDE / max(img.size)
+        img = img.resize((int(img.width * s), int(img.height * s)), Image.LANCZOS)
+    img.save(mp, "JPEG", quality=88, optimize=True)
+    meta.has_map = True
+    store.log(meta, "上传底图", f"{mp.stat().st_size/1024:.0f}KB {img.size}")
+    return {"ok": True, "size": list(img.size), "bytes": mp.stat().st_size}
+
+
+# ---------- 路由：F2 校验 ----------
+
+@app.post("/api/projects/{pid}/validate")
+def run_validate(pid: str) -> dict:
+    meta = _meta_or_404(pid)
+    report = _run_validation(meta)
+    store.log(meta, "运行校验",
+              f"行={report.summary.total_rows} 错={report.summary.error_count} "
+              f"警={report.summary.warning_count}")
+    return report.model_dump()
+
+
+@app.get("/api/projects/{pid}/report.md")
+def report_md(pid: str) -> PlainTextResponse:
+    _meta_or_404(pid)
+    report = _load_report(pid)
+    if not report:
+        raise HTTPException(404, "尚未生成校验报告")
+    return PlainTextResponse(report_markdown(report), media_type="text/markdown; charset=utf-8")
+
+
+# ---------- 路由：F3/F4/F5 生成 · 预览 · 打包 ----------
+
+@app.post("/api/projects/{pid}/generate")
+def generate(pid: str, req: GenerateRequest) -> dict:
+    return generate_bundle(pid, req.form, exclude_low_confidence=req.exclude_low_confidence,
+                           school=req.school)
+
+
+@app.get("/api/projects/{pid}/preview")
+def preview(pid: str, form: str = "relative") -> dict:
+    """返回预览地址（bundle 已按 StaticFiles 挂载，相对路径可正确解析）。"""
+    _meta_or_404(pid)
+    dest = _bundle_dir(pid, form)
+    htmls = list(dest.glob("*.html")) if dest.exists() else []
+    if not htmls:
+        raise HTTPException(404, "尚未生成，请先调用 POST /generate")
+    name = htmls[0].name
+    return {"form": form, "url": f"/bundle/{pid}/out/{form}/{quote(name)}",
+            "html_name": name}
+
+
+@app.get("/api/projects/{pid}/download")
+def download(pid: str, form: str = "relative") -> FileResponse:
+    meta = _meta_or_404(pid)
+    zp = store.project_dir(pid) / "dist" / f"{packager.zip_basename(meta.school)}.zip"
+    if not zp.exists():
+        # 未打包则即时生成
+        generate_bundle(pid, form)
+    if not zp.exists():
+        raise HTTPException(404, "zip 不存在")
+    return FileResponse(zp, filename=zp.name, media_type="application/zip")
+
+
+@app.get("/api/projects/{pid}/artifacts")
+def artifacts(pid: str) -> dict:
+    _meta_or_404(pid)
+    root = store.project_dir(pid)
+    dist = sorted((p.name, p.stat().st_size) for p in (root / "dist").glob("*.zip")) \
+        if (root / "dist").exists() else []
+    out = {}
+    for form in ("relative", "inline"):
+        d = root / "out" / form
+        if d.exists():
+            out[form] = [str(p.relative_to(d).as_posix()) for p in sorted(d.rglob("*"))
+                         if p.is_file()]
+    return {"zips": [{"name": n, "bytes": b} for n, b in dist], "bundles": out}
+
+
+# ---------- 路由：F6 / F7 ----------
+
+@app.post("/api/census/parse")
+async def census_parse(file: UploadFile = File(...), as_csv: bool = Form(False)) -> JSONResponse:
+    data = await file.read()
+    text, enc = decode_bytes(data)
+    records, warnings = census_parser.parse_batch(text)
+    label = census_parser.re.search(r"batch\s*(\d+)", text[:200], census_parser.re.IGNORECASE)
+    batch_label = f"batch{label.group(1)}" if label else "batch"
+    draft = census_parser.records_to_draft_csv(records, batch_label)
+    if as_csv:
+        return JSONResponse({"encoding": enc, "count": len(records), "draft_csv": draft,
+                             "warnings": warnings,
+                             "suggestions": census_parser.merge_suggestions(records)})
+    return JSONResponse({
+        "encoding": enc, "count": len(records), "warnings": warnings,
+        "records": [r.as_dict() for r in records][:500],
+        "suggestions": census_parser.merge_suggestions(records),
+        "draft_csv": draft,
+    })
+
+
+@app.post("/api/projects/{pid}/summary")
+def summary(pid: str) -> dict:
+    meta = _meta_or_404(pid)
+    report = _load_report(pid)
+    rows = passing_rows(report) if report else []
+    stats = injector.generation_stats(rows) if rows else None
+    md = summary_writer.build_summary(meta, report, stats)
+    out = store.project_dir(pid) / "归并决策摘要.md"
+    out.write_text(md, encoding="utf-8")
+    store.log(meta, "生成归并决策摘要", f"{len(md)} 字符")
+    return {"markdown": md, "path": str(out)}
+
+
+# ---------- 路由：模板与首页 ----------
+
+@app.get("/api/template")
+def template_csv() -> PlainTextResponse:
+    return PlainTextResponse(empty_template(),
+                             media_type="text/csv; charset=utf-8",
+                             headers={"Content-Disposition":
+                                      'attachment; filename="cat-roster-template.csv"'})
+
+
+@app.get("/", response_class=HTMLResponse)
+def index() -> str:
+    return (Path(__file__).resolve().parent.parent / "static" / "index.html") \
+        .read_text(encoding="utf-8")
+
+
+@app.get("/healthz")
+def healthz() -> dict:
+    return {"ok": True, "service": "catgalaxy-factory", "version": "1.0.0"}
+
+
+# bundle 静态托管：让生成的 HTML 里的相对路径（assets/…）可被浏览器解析
+app.mount("/bundle", StaticFiles(directory=str(WORKSPACE)), name="bundle")
+app.mount("/static", StaticFiles(directory=str(Path(__file__).resolve().parent.parent / "static")),
+          name="static")
