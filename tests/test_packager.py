@@ -37,7 +37,7 @@ def test_build_relative_bundle(tmp_path):
     dest = tmp_path / "b"
     written = build_relative_bundle(
         dest, html="<html>x</html>", html_name="校喵星图.html",
-        photos={"a.jpg": b"AAA", "b.jpg": b"BBB"}, map_bytes=b"MAP",
+        photos=[("a.jpg", b"AAA"), ("b.jpg", b"BBB")], map_bytes=b"MAP",
         roster_csv="编号\n", report_md="# 报告", summary_md="# 摘要")
     assert (dest / "校喵星图.html").read_text(encoding="utf-8") == "<html>x</html>"
     assert (dest / "assets" / "photos" / "a.jpg").read_bytes() == b"AAA"
@@ -51,9 +51,26 @@ def test_build_relative_bundle(tmp_path):
     assert "校喵星图.html" in written
 
 
+def test_build_relative_bundle_streams_photos_in_the_given_order(tmp_path):
+    """照片可以是生成器：写一张读一张，且顺序由调用方定（函数内部不再排序）。"""
+    dest = tmp_path / "b4"
+    reads: list[str] = []
+
+    def gen():
+        for name in ("z.jpg", "a.jpg", "m.jpg"):
+            reads.append(name)
+            yield name, name.encode("ascii")
+
+    written = build_relative_bundle(dest, html="h", html_name="x.html", photos=gen())
+    assert [w for w in written if w.startswith("assets/photos/")] == [
+        "assets/photos/z.jpg", "assets/photos/a.jpg", "assets/photos/m.jpg"]
+    assert reads == ["z.jpg", "a.jpg", "m.jpg"]
+    assert (dest / "assets" / "photos" / "m.jpg").read_bytes() == b"m.jpg"
+
+
 def test_build_relative_bundle_optional_files(tmp_path):
     dest = tmp_path / "b2"
-    written = build_relative_bundle(dest, html="h", html_name="x.html", photos={})
+    written = build_relative_bundle(dest, html="h", html_name="x.html", photos=())
     assert written == ["x.html"]
     assert not (dest / "assets").exists()
 
@@ -62,7 +79,7 @@ def test_build_relative_bundle_clears_stale(tmp_path):
     dest = tmp_path / "b3"
     dest.mkdir()
     (dest / "old.html").write_text("stale")
-    build_relative_bundle(dest, html="h", html_name="new.html", photos={})
+    build_relative_bundle(dest, html="h", html_name="new.html", photos=())
     assert not (dest / "old.html").exists()
     assert (dest / "new.html").exists()
 

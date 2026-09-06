@@ -151,12 +151,22 @@ def _photo_names(pid: str, names: Optional[set[str]] = None) -> set[str]:
             if lowered is None or p.name in names or p.name.lower() in lowered}
 
 
-def _inline_reader(pid: str, map_bytes: bytes):
-    """iter_photo_chunks 的取字节回调：底图来自内存，照片用到哪张读哪张。"""
+def _photo_reader(pid: str):
+    """按名字逐张读盘的回调。产物落盘时用它，整册照片就不必同时在内存里。"""
     d = _photo_dir(pid)
 
     def read(name: str) -> bytes:
-        return map_bytes if name == "map.jpg" else retry_read_bytes(d / name)
+        return retry_read_bytes(d / name)
+
+    return read
+
+
+def _inline_reader(pid: str, map_bytes: bytes):
+    """iter_photo_chunks 的取字节回调：底图来自内存，照片用到哪张读哪张。"""
+    read_photo = _photo_reader(pid)
+
+    def read(name: str) -> bytes:
+        return map_bytes if name == "map.jpg" else read_photo(name)
 
     return read
 
@@ -246,14 +256,16 @@ def generate_bundle(pid: str, form: str = "relative", *,
             chunks=injector.iter_photo_chunks(pairs, _inline_reader(pid, map_bytes)),
             roster_csv=roster_csv, report_md=md, summary_md=summary_md)
     else:
-        photos = {n: retry_read_bytes(_photo_dir(pid) / n) for n in sorted(found)}
+        read_photo = _photo_reader(pid)
+        names = sorted(found)          # build_relative_bundle 不再排序，顺序在这里定
         html = render_starmap(school=meta.school, subtitle=meta.subtitle, rows=rows,
                               form=form, map_filename="assets/map.jpg",
                               photo_script_names=[],
                               calib=calib_override, map_size=map_size,
                               theme=theme, logo_src=logo_src)
         written = packager.build_relative_bundle(dest, html=html, html_name=html_name,
-                                                 photos=photos, map_bytes=map_bytes,
+                                                 photos=((n, read_photo(n)) for n in names),
+                                                 map_bytes=map_bytes,
                                                  logo_bytes=logo_bytes,
                                                  roster_csv=roster_csv, report_md=md,
                                                  summary_md=summary_md)

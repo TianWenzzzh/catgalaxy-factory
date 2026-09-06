@@ -1,9 +1,13 @@
-"""inline 分片流式写出：先规划分片名，再边读盘边编码边落盘。
+"""产物落盘流式化：两种形态都改成「写一张读一张」，峰值不再随图廊大小增长。
 
-改动前 generate_bundle 的 inline 分支同时握着两份完整图廊——_photo_blobs()
-的原始字节字典，加上 build_photo_chunks() 的 base64 文本列表（后者还比前者
-大 1/3）。75 只猫约 33MB 尚可忍，但照片数上限是 3000 张、单张上限 200KB，
-顶格就是 1.4GB。现在峰值只剩一个分片（PHOTO_CHUNK_BYTES = 1.5MB）加一张照片。
+inline 是重灾区。改动前 generate_bundle 同时握着两份完整图廊——原始字节字典，
+加上 base64 分片文本（后者还比前者大 1/3）。75 张真照片实测 tracemalloc 峰值
+87.21MB；而照片上限是 3000 张、单张 200KB，顶格就是 3.5GB。现在先只 stat 出
+字节数，按「base64 长度恒为 4*ceil(n/3)」算准行长、定好分片边界，再交给生成器
+逐片读盘、编码、写出：同一场景 11.4MB，且 10/30/75 张分别是 7.43/10.22/10.92MB
+——峰值由分片大小决定，不由图廊大小决定。relative 原本也要把整册读成字典
+（14.81MB），改成逐张读盘后是 0.98MB。耗时两边都没变（0.88s / 0.63s），
+这一改省的是内存不是时间。
 
 代价是多出一条必须成立的不变量：规划阶段只 stat 不 read，它算出的分片边界
 必须和真正编码时的边界一模一样，否则 HTML 里的 <script src> 会指向不存在的
@@ -182,10 +186,11 @@ def _rows(photo_names):
             for i, n in enumerate(photo_names, start=1)]
 
 
-def test_inline_generation_reads_no_photo_before_the_bundle_starts_writing(client, monkeypatch):
-    """旧实现到这里已经把整册照片读进内存了；新实现应该一张都还没读。"""
+@pytest.mark.parametrize("form", ["inline", "relative"])
+def test_generation_reads_no_photo_before_the_bundle_starts_writing(client, monkeypatch, form):
+    """两种形态都改成写一张读一张：开始落盘前不该有任何照片已经在内存里。"""
     names = [f"p{i:02d}.jpg" for i in range(6)]
-    pid = _ready(client, "流式校", _rows(names), names)
+    pid = _ready(client, f"流式{form}校", _rows(names), names)
 
     reads: list[str] = []
     real_read = main_mod.retry_read_bytes
@@ -199,21 +204,21 @@ def test_inline_generation_reads_no_photo_before_the_bundle_starts_writing(clien
     monkeypatch.setattr(main_mod, "retry_read_bytes", spy)
 
     seen = {}
-    real_build = packager.build_inline_bundle
+    real_build = getattr(packager, f"build_{form}_bundle")
+    arg = "chunks" if form == "inline" else "photos"
 
     def build_spy(dest, **kw):
         seen["photo_reads"] = list(reads)
-        seen["chunks_type"] = type(kw["chunks"]).__name__
+        seen["arg_type"] = type(kw[arg]).__name__
         return real_build(dest, **kw)
 
-    monkeypatch.setattr(packager, "build_inline_bundle", build_spy)
+    monkeypatch.setattr(packager, f"build_{form}_bundle", build_spy)
 
-    g = client.post(f"/api/projects/{pid}/generate", json={"form": "inline"})
+    g = client.post(f"/api/projects/{pid}/generate", json={"form": form})
     assert g.status_code == 200, g.text
-    d = g.json()
     assert seen["photo_reads"] == [], "开始落盘前就把照片全读了，等于没做流式"
-    assert seen["chunks_type"] == "generator"
-    assert d["photos_embedded"] == 6
+    assert seen["arg_type"] == "generator"
+    assert g.json()["photos_embedded"] == 6
     assert len(reads) == 6, "生成结束后 6 张照片都应该被读过一次"
 
 

@@ -34,13 +34,18 @@ def _write(path: Path, content) -> None:
 
 
 def build_relative_bundle(dest: Path, *, html: str, html_name: str,
-                          photos: dict[str, bytes],
+                          photos: Iterable[tuple[str, bytes]],
                           map_bytes: Optional[bytes] = None,
                           logo_bytes: Optional[bytes] = None,
                           roster_csv: Optional[str] = None,
                           report_md: Optional[str] = None,
                           summary_md: Optional[str] = None) -> list[str]:
-    """HTML + assets 形态。返回写入的相对路径清单。"""
+    """HTML + assets 形态。返回写入的相对路径清单。
+
+    ``photos`` 是 (名字, 字节) 的可迭代对象，可以是生成器：写一张读一张，
+    整册图廊不必同时在内存里。因此这里不再排序——写入顺序（也就是返回清单里
+    assets/photos/* 的顺序）由调用方给定，main.py 传的是按名字排好序的。
+    """
     if dest.exists():
         shutil.rmtree(dest)
     written: list[str] = []
@@ -57,7 +62,7 @@ def build_relative_bundle(dest: Path, *, html: str, html_name: str,
         _write(dest / "assets" / "logo.png", logo_bytes)
         written.append("assets/logo.png")
 
-    for name, blob in sorted(photos.items()):
+    for name, blob in photos:
         rel = f"assets/photos/{name}"
         _write(dest / "assets" / "photos" / name, blob)
         written.append(rel)
