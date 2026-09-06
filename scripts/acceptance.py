@@ -185,6 +185,75 @@ def verify_zip_contents(ev: Evidence, zf: zipfile.ZipFile, cats: list[dict],
         ev.check(f"zip 内含 {extra}", extra in names, extra)
 
 
+CALIB_XY = {"x": 0.147, "y": 0.258}
+
+
+def verify_calib(client: TestClient, ev: Evidence, pid: str, n_cats: int) -> None:
+    """F8 · 底图标定：人工星位要能存下来、烘焙进产物，并能一键退回算法推导。"""
+    r = client.get(f"/api/projects/{pid}/calib")
+    if not ev.check("F8 读取星位标定", r.status_code == 200,
+                    "" if r.status_code == 200 else r.text[:200]):
+        return
+    j = r.json()
+    ids = j["ids"][:2]
+    s = j["stats"]
+    ev.check("F8 初始状态为算法推导",
+             j["source"] == "derived" and s["manual"] == 0 and s["total"] == n_cats,
+             f"来源 {j['source']}，{s['manual']}/{s['total']} 人工标定，"
+             f"底图尺寸 {j['map_size'] or '未上传（用兜底 1920×1239）'}")
+    if not ids:
+        ev.check("F8 名册里有可标定的编号", False, "ids 为空")
+        return
+
+    manual = {ids[0]: CALIB_XY}
+    if len(ids) > 1:
+        manual[ids[1]] = {"x": 0.803, "y": 0.611}
+    r = client.put(f"/api/projects/{pid}/calib",
+                   json={"positions": manual, "note": "验收：人工标定 2 颗星"})
+    j = r.json() if r.status_code == 200 else {}
+    ev.check("F8 保存人工标定", r.status_code == 200 and j.get("saved") == len(manual),
+             f"本次 {j.get('saved')} 颗，累计 {j.get('total')} 颗，"
+             f"忽略未知编号 {j.get('ignored_unknown_ids') or '无'}")
+
+    r = client.get(f"/api/projects/{pid}/calib")
+    j = r.json()
+    ev.check("F8 复读来源变为 manual",
+             j["source"] == "manual" and j["stats"]["manual"] == len(manual)
+             and j["note"] == "验收：人工标定 2 颗星",
+             f"来源 {j['source']}，人工 {j['stats']['manual']} / 推导 {j['stats']['derived']}"
+             f"，备注「{j['note']}」")
+
+    r = client.put(f"/api/projects/{pid}/calib",
+                   json={"positions": {ids[0]: {"x": 1.7, "y": -0.2}}})
+    ok = r.status_code == 400
+    ev.check("F8 越界坐标被拒（必须是 0~1 归一化值）", ok,
+             f"HTTP {r.status_code}" + (f"：{r.json().get('detail', '')[:60]}" if ok else ""))
+    r2 = client.get(f"/api/projects/{pid}/calib")
+    ev.check("F8 被拒的写入没有污染已存标定",
+             r2.json()["stats"]["manual"] == len(manual),
+             f"仍是人工 {r2.json()['stats']['manual']} 颗")
+
+    r = client.post(f"/api/projects/{pid}/generate", json={"form": "relative"})
+    d = r.json()
+    ev.check("F8 标定后重新生成", r.status_code == 200 and d["calib"]["manual"] == len(manual),
+             f"烘焙人工星位 {d['calib']['manual']}/{d['calib']['total']} 颗")
+    html = client.get(d["preview_url"]).text
+    baked = f'"{ids[0]}":{{"x":{CALIB_XY["x"]},"y":{CALIB_XY["y"]}}}'
+    ev.check("F8 人工坐标已烘焙进产物 CALIB", baked in html,
+             f"产物里找到 {baked}" if baked in html else f"产物里找不到 {baked}")
+    ev.check("F8 产物页脚注明标定比例",
+             f"星位人工标定 {len(manual)}/{d['calib']['total']}" in html,
+             f"星位人工标定 {len(manual)}/{d['calib']['total']}")
+
+    r = client.delete(f"/api/projects/{pid}/calib")
+    back = client.get(f"/api/projects/{pid}/calib").json()
+    ev.check("F8 清除标定后回到算法推导",
+             r.status_code == 200 and r.json()["cleared"] is True
+             and back["source"] == "derived" and back["stats"]["manual"] == 0,
+             f"cleared={r.json().get('cleared')}，来源 {back['source']}，"
+             f"人工 {back['stats']['manual']} 颗")
+
+
 def run_flow(client: TestClient, ev: Evidence, *, school: str, subtitle: str,
              roster_text: str, photos: list[tuple[str, bytes]], expect_cats: int,
              forms: tuple[str, ...] = ("relative", "inline")) -> str:
@@ -258,6 +327,8 @@ def run_flow(client: TestClient, ev: Evidence, *, school: str, subtitle: str,
         ev.check(f"F3 注入结果可从产物反解（{form}）", len(cats) == expect_cats,
                  f"HTML 里解出 {len(cats)} 条 CATS，首条键：{','.join(list(cats[0])[:8])}…")
         verify_zip_contents(ev, zf, cats, form)
+
+    verify_calib(client, ev, pid, expect_cats)
 
     r = client.post(f"/api/projects/{pid}/summary")
     md = r.json().get("markdown", "")
