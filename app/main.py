@@ -27,7 +27,7 @@ from .config import (IMAGE_EXTS, LOGO_EXTS, MAX_LOGO_UPLOAD_BYTES,
                      ensure_dirs, retry_read_bytes, retry_read_text)
 from .csv_loader import build_column_map, decode_bytes, empty_template, normalize_id, parse_roster
 from .image_proc import generate_default_map
-from .injector import build_photo_chunks, render_starmap
+from .injector import render_starmap
 from .models import (CalibData, CalibPoint, CalibUpdateRequest, CreateProjectRequest,
                      GenerateRequest, MergeDecision, MergeDecisionRequest, ProjectMeta,
                      RosterPatch, ThemeUpdateRequest, ValidationReport)
@@ -135,12 +135,30 @@ def _photo_url(pid: str, name: str) -> str:
     return ""
 
 
-def _photo_blobs(pid: str, names: Optional[set[str]] = None) -> dict[str, bytes]:
-    out: dict[str, bytes] = {}
-    for p in store.photo_files(pid):
-        if names is None or p.name in names or p.name.lower() in {n.lower() for n in names}:
-            out[p.name] = retry_read_bytes(p)
-    return out
+def _photo_dir(pid: str) -> Path:
+    return store.project_dir(pid) / "assets" / "photos"
+
+
+def _photo_names(pid: str, names: Optional[set[str]] = None) -> set[str]:
+    """名册引用的照片里，盘上真实存在的那些（返回盘上的写法）。
+
+    只扫名字、不读字节：inline 形态靠它把「整册照片进内存」推迟到写分片那一刻。
+    命中规则和原来读字节的版本一致——名册里大小写写错也认得出来，但返回的是盘上
+    的名字，所以 missing_photos 里仍会留下那个「只差大小写」的引用名（旧行为如此）。
+    """
+    lowered = {n.lower() for n in names} if names is not None else None
+    return {p.name for p in store.photo_files(pid)
+            if lowered is None or p.name in names or p.name.lower() in lowered}
+
+
+def _inline_reader(pid: str, map_bytes: bytes):
+    """iter_photo_chunks 的取字节回调：底图来自内存，照片用到哪张读哪张。"""
+    d = _photo_dir(pid)
+
+    def read(name: str) -> bytes:
+        return map_bytes if name == "map.jpg" else retry_read_bytes(d / name)
+
+    return read
 
 
 def _bundle_dir(pid: str, form: str) -> Path:
@@ -200,7 +218,7 @@ def generate_bundle(pid: str, form: str = "relative", *,
     referenced = {r.photo_file.strip().replace("\\", "/").split("/")[-1]
                   for r in rows if r.photo_file.strip()}
     stage(f"读 {len(referenced)} 张照片")
-    photos = _photo_blobs(pid, referenced)
+    found = _photo_names(pid, referenced)
     stage("写名册与两份报告")
     roster_csv = retry_read_bytes(
         store.project_dir(pid) / "roster.csv").decode("utf-8", errors="replace")
@@ -213,18 +231,22 @@ def generate_bundle(pid: str, form: str = "relative", *,
 
     stage("渲染星图 HTML 并落盘产物")
     if form == "inline":
-        payload = dict(photos)
-        payload["map.jpg"] = map_bytes
-        chunks = build_photo_chunks(payload)
+        # 底图也进分片（模板从 __PHOTOS["map.jpg"] 取它），所以一起参与排序和切片；
+        # 真有照片叫 map.jpg 时由底图覆盖——与旧写法 payload["map.jpg"]=map_bytes 同义。
+        sizes = {n: (_photo_dir(pid) / n).stat().st_size for n in found}
+        sizes["map.jpg"] = len(map_bytes)
+        pairs = [(n, sizes[n]) for n in sorted(sizes)]
         html = render_starmap(school=meta.school, subtitle=meta.subtitle, rows=rows,
                               form=form, map_filename="assets/map.jpg",
-                              photo_script_names=[n for n, _ in chunks],
+                              photo_script_names=injector.plan_photo_chunks(pairs),
                               calib=calib_override, map_size=map_size,
                               theme=theme, logo_src=logo_src)
-        written = packager.build_inline_bundle(dest, html=html, html_name=html_name,
-                                               chunks=chunks, roster_csv=roster_csv,
-                                               report_md=md, summary_md=summary_md)
+        written = packager.build_inline_bundle(
+            dest, html=html, html_name=html_name,
+            chunks=injector.iter_photo_chunks(pairs, _inline_reader(pid, map_bytes)),
+            roster_csv=roster_csv, report_md=md, summary_md=summary_md)
     else:
+        photos = {n: retry_read_bytes(_photo_dir(pid) / n) for n in sorted(found)}
         html = render_starmap(school=meta.school, subtitle=meta.subtitle, rows=rows,
                               form=form, map_filename="assets/map.jpg",
                               photo_script_names=[],
@@ -246,18 +268,18 @@ def generate_bundle(pid: str, form: str = "relative", *,
     meta.photo_count = len(store.photo_files(pid))
     meta.has_map = True
     store.log(meta, "生成星图",
-              f"form={form} cats={len(rows)} photos={len(photos)} "
+              f"form={form} cats={len(rows)} photos={len(found)} "
               f"exclude_low={exclude_low_confidence} "
               f"标定={calib_stat['manual']}/{calib_stat['total']} "
               f"主题={theme.preset} 校徽={'有' if logo_bytes else '无'} zip={zip_path.name}")
 
-    missing_photos = sorted(referenced - set(photos))
+    missing_photos = sorted(referenced - found)
     return {
         "project_id": pid,
         "school": meta.school,
         "form": form,
         "cats": len(rows),
-        "photos_embedded": len(photos),
+        "photos_embedded": len(found),
         "missing_photos": missing_photos,
         "files": written,
         "stats": stats,

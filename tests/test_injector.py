@@ -5,7 +5,8 @@ import re
 import pytest
 
 from app.injector import (CATS_TOKEN, PHOTO_SCRIPTS_TOKEN, build_cat_entries,
-                          build_photo_chunks, photo_script_tags, render_starmap)
+                          iter_photo_chunks, photo_script_tags, plan_photo_chunks,
+                          render_starmap)
 from app.models import CatRow
 
 
@@ -99,31 +100,36 @@ def test_script_tag_escaping():
     assert "<\\/" in body
 
 
-def test_build_photo_chunks_single():
+def test_iter_photo_chunks_single():
     photos = {"a.jpg": b"\xff\xd8\xff\xe0fakejpeg"}
-    chunks = build_photo_chunks(photos)
+    sizes = [(n, len(b)) for n, b in photos.items()]
+    chunks = list(iter_photo_chunks(sizes, photos.__getitem__))
     assert len(chunks) == 1
     name, content = chunks[0]
     assert name == "photo-data-01.js"
+    assert name == plan_photo_chunks(sizes)[0]
     assert content.startswith("window.__PHOTOS=window.__PHOTOS||{};")
     assert 'data:image/jpeg;base64,' in content
     assert '"a.jpg"' in content
 
 
-def test_build_photo_chunks_splits_by_size():
+def test_iter_photo_chunks_splits_by_size():
     photos = {f"p{i:02d}.jpg": b"x" * 30000 for i in range(10)}
-    chunks = build_photo_chunks(photos, chunk_bytes=45000)
+    sizes = [(n, len(b)) for n, b in photos.items()]
+    chunks = list(iter_photo_chunks(sizes, photos.__getitem__, chunk_bytes=45000))
     assert len(chunks) > 1
     names = [n for n, _ in chunks]
     assert names == sorted(names)
+    assert names == plan_photo_chunks(sizes, 45000)
     assert all(re.fullmatch(r"photo-data-\d{2}\.js", n) for n in names)
     joined = "".join(c for _, c in chunks)
     for i in range(10):
         assert f'"p{i:02d}.jpg"' in joined
 
 
-def test_build_photo_chunks_empty():
-    assert build_photo_chunks({}) == []
+def test_iter_photo_chunks_empty():
+    assert list(iter_photo_chunks([], lambda name: b"")) == []
+    assert plan_photo_chunks([]) == []
 
 
 def test_photo_script_tags():

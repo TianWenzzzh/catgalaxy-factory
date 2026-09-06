@@ -6,7 +6,7 @@ import shutil
 import zipfile
 from datetime import date
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from .config import atomic_replace, atomic_write_bytes, atomic_write_text, tmp_sibling
 
@@ -75,11 +75,15 @@ def build_relative_bundle(dest: Path, *, html: str, html_name: str,
 
 
 def build_inline_bundle(dest: Path, *, html: str, html_name: str,
-                        chunks: list[tuple[str, str]],
+                        chunks: Iterable[tuple[str, str]],
                         roster_csv: Optional[str] = None,
                         report_md: Optional[str] = None,
                         summary_md: Optional[str] = None) -> list[str]:
-    """纯文本（base64 内嵌）形态。返回写入的相对路径清单。"""
+    """纯文本（base64 内嵌）形态。返回写入的相对路径清单。
+
+    ``chunks`` 可以是生成器：只遍历一次、边来边写，调用方就不必把整册分片
+    攒在内存里。rmtree 发生在遍历之前，且分片读的是 assets/photos，与 dest 无关。
+    """
     if dest.exists():
         shutil.rmtree(dest)
     written: list[str] = []

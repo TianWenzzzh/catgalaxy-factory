@@ -7,7 +7,7 @@ import re
 from datetime import date
 from html import escape
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Iterator, Optional
 
 from .config import DEFAULT_MAP_H, DEFAULT_MAP_W, PHOTO_CHUNK_BYTES, STARMAP_TEMPLATE
 from .csv_loader import normalize_id
@@ -160,27 +160,62 @@ def build_zone_list(rows: list[CatRow]) -> list[dict]:
     return [{"name": k, "count": v} for k, v in zs.items()]
 
 
-def build_photo_chunks(photos: dict[str, bytes],
-                       chunk_bytes: int = PHOTO_CHUNK_BYTES) -> list[tuple[str, str]]:
-    """照片字节 → base64 分片 JS 文件内容。返回 [(文件名, JS 文本)]。"""
-    chunks: list[list[str]] = [[]]
-    sizes = [0]
-    for name in sorted(photos):
-        b64 = base64.b64encode(photos[name]).decode("ascii")
-        line = f'__PHOTOS[{_js(name)}]="data:image/jpeg;base64,{b64}";'
-        if sizes[-1] + len(line) > chunk_bytes and chunks[-1]:
-            chunks.append([])
-            sizes.append(0)
-        chunks[-1].append(line)
-        sizes[-1] += len(line)
+def _photo_line(name: str, blob: bytes) -> str:
+    b64 = base64.b64encode(blob).decode("ascii")
+    return f'__PHOTOS[{_js(name)}]="data:image/jpeg;base64,{b64}";'
 
-    out: list[tuple[str, str]] = []
-    for i, lines in enumerate(chunks, start=1):
-        if not lines:
-            continue
-        content = "window.__PHOTOS=window.__PHOTOS||{};\n" + "\n".join(lines) + "\n"
-        out.append((f"photo-data-{i:02d}.js", content))
-    return out
+
+def _photo_line_len(name: str, nbytes: int) -> int:
+    """不拿到字节也算得准的行长：base64 长度恒为 4*ceil(n/3)。
+
+    外壳直接量 _photo_line(name, b"")，转义规则哪天改了这里自动跟着改，
+    不会两处各写一份然后悄悄错位。
+    """
+    return len(_photo_line(name, b"")) + 4 * ((nbytes + 2) // 3)
+
+
+def _chunk_plan(sizes: Iterable[tuple[str, int]],
+                chunk_bytes: int) -> list[list[str]]:
+    """(名字, 字节数) → 每个分片装哪些名字。分片边界的唯一真相。
+
+    规划（只 stat）与写出（真读盘）都走这一条规则：两边若各算一次，
+    HTML 里的 <script src> 就会指向不存在的文件，星图打开是一片黑。
+    """
+    groups: list[list[str]] = [[]]
+    size = 0
+    for name, nbytes in sorted(sizes):
+        n = _photo_line_len(name, nbytes)
+        if size + n > chunk_bytes and groups[-1]:
+            groups.append([])
+            size = 0
+        groups[-1].append(name)
+        size += n
+    return [g for g in groups if g]
+
+
+def _chunk_name(i: int) -> str:
+    return f"photo-data-{i:02d}.js"
+
+
+def _chunk_text(lines: list[str]) -> str:
+    return "window.__PHOTOS=window.__PHOTOS||{};\n" + "\n".join(lines) + "\n"
+
+
+def plan_photo_chunks(sizes: Iterable[tuple[str, int]],
+                      chunk_bytes: int = PHOTO_CHUNK_BYTES) -> list[str]:
+    """(名字, 字节数) → 分片文件名清单。渲染 HTML 的 <script> 列表用它。"""
+    return [_chunk_name(i)
+            for i in range(1, len(_chunk_plan(sizes, chunk_bytes)) + 1)]
+
+
+def iter_photo_chunks(sizes: Iterable[tuple[str, int]], read: Callable[[str], bytes],
+                      chunk_bytes: int = PHOTO_CHUNK_BYTES) -> Iterator[tuple[str, str]]:
+    """按 _chunk_plan 的分组逐片产出 (文件名, JS 文本)，用到哪片才读哪片的照片。
+
+    峰值内存 = 一个分片 + 一张照片，而不是整册图廊的两份拷贝。
+    """
+    for i, group in enumerate(_chunk_plan(sizes, chunk_bytes), start=1):
+        yield _chunk_name(i), _chunk_text([_photo_line(n, read(n)) for n in group])
 
 
 def photo_script_tags(names: Iterable[str]) -> str:
