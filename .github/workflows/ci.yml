@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# 同一条分支上新的 push 直接顶掉还在跑的旧任务：这套流程单次要几分钟，
+# 排队跑完一个已经被覆盖的提交没有意义。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # Windows 不是凑数的：原子写重试认的是 WinError 32/33（文件被杀软/索引器占用），
+    # 路径分隔符、GBK 控制台这些坑也只在 Windows 上出现，而交付对象就是 Windows 用户。
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+
+    env:
+      PYTHONUTF8: 1
+      PYTHONIOENCODING: utf-8
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: pytest
+        run: python -m pytest -q
+
+      # 只跑 demo2：full76 要读 E 盘总库里的真实名册与 75 张原图，那是本地实测证据，
+      # 不该也没法进 CI。demo2 在 E 盘缺失时会自动回退——表头用内置 12 列，
+      # F6 用合成 batch，其余 F1-F5 / F7-F11 全走真实 HTTP 接口，一条不少。
+      - name: 验收脚本（demo2，不依赖 E 盘）
+        run: python scripts/acceptance.py --case demo2
+
+      - name: 上传验收证据
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-evidence-${{ matrix.os }}
+          path: docs/验收证据-*.md
+          if-no-files-found: warn

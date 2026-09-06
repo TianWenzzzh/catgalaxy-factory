@@ -73,13 +73,31 @@ python -m venv .venv
 脚本走真实 HTTP 接口，逐步打印实测结果，并把证据写到 `docs\验收证据-*.md`。任一场景失败退出码为 1。
 `--case full76` 需要 E 盘（`E:\猫咪星图_总库`）挂载；缺失时会明确报出而不会静默跳过。
 
-## 五、测试
+## 五、测试与 CI
 
 ```bash
 .venv\Scripts\python -m pytest -q
 ```
 
-8 个测试文件覆盖 CSV 解析、校验规则、星位映射、模板注入、打包、图片处理、普查解析与端到端 API。核心模块（校验 / 注入 / 打包）均有单测。
+18 个测试文件、501 条用例：CSV 解析、校验规则、星位映射、模板注入、打包、图片处理、普查解析、归并、标定、名册编辑、并发锁、zip 限额、进度、主题、控制台前端接线、CI 配置，以及端到端 API。核心模块（校验 / 注入 / 打包）均有单测。
+
+其中两类不是「测功能」而是「测接线」：
+
+- `tests/test_console.py` —— 前端没有构建也没有类型检查，`$("#id")` 指向已改名的 id 会直接 TypeError、`fetch` 打错路径只会变成一句「失败」的 toast。这两类 bug 靠比对 `app.js` / `index.html` / `openapi.json` 静态查出来。
+- `tests/test_ci.py` —— 盯着工作流真的跑了 pytest 与 acceptance demo2、矩阵里有 Windows、以及验收脚本对 E 盘的依赖都有兜底。
+
+CI（`.github/workflows/ci.yml`）在 push / PR 时跑 `ubuntu-latest` + `windows-latest`：
+
+```
+pip install -e ".[dev]"  →  pytest -q  →  python scripts/acceptance.py --case demo2
+```
+
+- **Windows 在矩阵里不是凑数**：原子写重试认的是 WinError 32/33（文件被杀软或索引器占用），路径分隔符和 GBK 控制台的坑也只在 Windows 上出现，而交付对象就是 Windows 用户。
+- **CI 只跑 demo2**，不跑 `full76`——后者要读 E 盘总库里的真实名册和 75 张原图，那是本地实测证据，不该也没法进 CI。
+- demo2 在 E 盘缺失时自动回退：表头用内置 12 列，F6 用一段内置合成 batch，其余 F1-F5 / F7-F11 一条不少（本机模拟无 E 盘环境实测 64 项检查全过）。
+- 验收证据作为 artifact 上传（`acceptance-evidence-{os}`）。
+
+> 当前仓库还没有配置 git 远端，工作流文件已就位，推到 GitHub 后即生效。
 
 ## 六、目录结构
 
@@ -90,28 +108,42 @@ catgalaxy-factory/
 ├─ 交付报告.md                  完成清单 / 验收证据 / 已知限制 / 次日待办
 ├─ pyproject.toml              依赖与 pytest 配置
 ├─ conftest.py                 测试夹具：临时 workspace、造图、造 CSV
+├─ .github/workflows/ci.yml    CI：ubuntu + windows 双跑 pytest 与 acceptance demo2
 ├─ app/
 │  ├─ main.py                  FastAPI 路由 + generate_bundle 编排
-│  ├─ config.py                路径与红线常量（长边 1200px / 单张 200KB / 分片 1.5MB）
-│  ├─ models.py                Pydantic：CatRow / Issue / Summary / ValidationReport / ProjectMeta
+│  ├─ config.py                路径与红线常量（长边 1200px / 单张 200KB / 分片 1.5MB / 各类上传限额）
+│  ├─ models.py                Pydantic：CatRow / Issue / Summary / ValidationReport / ProjectMeta / 各请求体
 │  ├─ csv_loader.py        F1  编码探测（utf-8-sig/gb18030/…）、列名别名、12 列解析
 │  ├─ validate.py          F2  14 条校验规则 + 照片引用归一
 │  ├─ star_mapper.py       F3  毛色→星色、照片数→星等、出没区→星位分区
-│  ├─ injector.py          F3  模板 token 注入 + base64 分片
-│  ├─ image_proc.py            照片压缩 / zip 解包（含中文文件名修复）/ 默认夜空底图
+│  ├─ injector.py          F3  模板 token 注入 + base64 分片（按上下文分别转义）
+│  ├─ image_proc.py            照片压缩 / zip 递归解包（含中文文件名修复）/ 校徽重编码 / 默认夜空底图
 │  ├─ packager.py          F5  bundle 落盘 + zip
-│  ├─ store.py                 文件系统即数据库：project.json + 操作日志
+│  ├─ store.py                 文件系统即数据库：project.json + 操作日志 + 原子读写重试
+│  ├─ locking.py               项目级写互斥（Semaphore，超时 180s）
+│  ├─ progress.py              长任务进度：progress.json + 前端轮询
 │  ├─ census_parser.py     F6  普查 batch → 名册草稿 + 归并建议
 │  ├─ summary_writer.py    F7  归并决策摘要骨架
-│  └─ templates/starmap.html   星图模板（Canvas 渲染器 + 注入 token）
+│  ├─ merge.py             F9  疑似重复候选组 + 人工判定体检
+│  ├─ theme.py             F11 配色预设 / 字体栈 / 白名单校验 / CSS 生成
+│  └─ templates/starmap.html   星图模板（Canvas 渲染器 + 注入 token + CSS 变量）
 ├─ static/                     控制台前端：index.html / app.js / style.css
-├─ scripts/acceptance.py       验收脚本
-├─ tests/                      单元测试 + 端到端测试
-├─ docs/                       验收证据（脚本产出）
+├─ scripts/
+│  ├─ acceptance.py            验收脚本（demo2 / full76 / all）
+│  └─ cleanup.py               工作区回收（默认干跑，--apply 才动手）
+├─ tests/                      18 个测试文件、501 条用例
+├─ docs/
+│  ├─ 跨校落地手册.md            普查到成品的完整 SOP + 脏 CSV 逐码处置清单
+│  └─ 验收证据-*.md             验收脚本产出的实测证据
 └─ workspace/                  运行期数据（已 gitignore）
    └─ {project_id}/
       ├─ project.json          项目元数据 + 操作日志（F7 的数据源）
-      ├─ roster.csv            名册原件（不改一字，保证可溯源）
+      ├─ roster.csv            名册（F10 在线编辑会原子回写，逐处记进操作日志）
+      ├─ report.json           最近一次校验报告
+      ├─ progress.json         长任务进度
+      ├─ calib.json            F8 人工星位（归一化 0~1）
+      ├─ merge.json            F9 归并判定与理由
+      ├─ theme.json  logo.png  F11 主题配置与校徽
       ├─ 校验报告.md  归并决策摘要.md
       ├─ assets/photos/*.jpg   压缩后的照片（长边≤1200px，单张≤200KB）
       ├─ assets/map.jpg        底图（上传的或自动生成的）

@@ -478,21 +478,20 @@ def case_demo2(client: TestClient) -> Evidence:
     pid = run_flow(client, ev, school="示例校", subtitle="跨校复制包 · 空骨架自检",
                    roster_text=roster_text, photos=photos, expect_cats=len(rows))
 
-    def parse_census(path: Path) -> dict:
-        r = client.post("/api/census/parse",
-                        files={"file": (path.name, path.read_bytes(), "text/plain")})
+    def parse_census(name: str, data: bytes) -> dict:
+        r = client.post("/api/census/parse", files={"file": (name, data, "text/plain")})
         return r.json() if r.status_code == 200 else {"_status": r.status_code,
                                                       "_text": r.text[:200]}
 
     batch = SKELETON / "普查" / "普查-batch01_模板.txt"
     if batch.exists():
-        j = parse_census(batch)
+        j = parse_census(batch.name, batch.read_bytes())
         ev.check("F6 普查解析接受骨架模板", "_status" not in j,
                  f"{batch.name}：解析 {j.get('count', 0)} 条（空模板，0 条属预期），"
                  f"警告 {len(j.get('warnings', []))} 条")
     real_batch = E_ROOT / "07_普查原始数据" / "普查-batch1.txt"
     if real_batch.exists():
-        j = parse_census(real_batch)
+        j = parse_census(real_batch.name, real_batch.read_bytes())
         recs = j.get("records", [])
         draft = j.get("draft_csv") or ""
         ev.check("F6 普查 batch → 名册草稿（真实 batch1）",
@@ -503,6 +502,28 @@ def case_demo2(client: TestClient) -> Evidence:
                  f"草稿 CSV {len(draft)} 字符 / {len(draft.splitlines()) - 1} 行；"
                  f"首条 {recs[0]['filename']} → {recs[0]['coat_main']}/{recs[0]['area']}"
                  if recs else "无记录")
+    if not batch.exists() and not real_batch.exists():
+        # E 盘不在（比如 CI）也不该让 F6 整个不测：用一段内置合成 batch 顶上。
+        # 三行里埋了两个已知答案——同毛色同场景的两条应被提成归并建议，
+        # C 画质应映射成置信度「低」。
+        text = "\n".join((
+            "普查 batch9（合成样例，无 E 盘时自检用）",
+            "ci-001.jpg | 1 | 橘白（橘背橘头，胸腹发白） | 体型胖 粉鼻 左耳缺角 | 宿舍楼前石台 | A | 是 | 无",
+            "ci-002.jpg | 1 | 橘白（橘背橘头，胸腹发白） | 体型胖 粉鼻 左耳缺角 常蹲石台 | 宿舍楼前石台 | B | 是 | 无",
+            "ci-003.jpg | 2 | 三花 | 背中三花斑 尾短 | 食堂后厨走廊 | C | 否 | 有路人入镜",
+        ))
+        j = parse_census("合成-batch9.txt", text.encode("utf-8"))
+        recs = j.get("records", [])
+        draft = j.get("draft_csv") or ""
+        low = [r for r in recs if r.get("confidence") == "低"]
+        ev.check("F6 普查解析（合成 batch，无 E 盘环境）",
+                 "_status" not in j and j.get("count", 0) == 3
+                 and len(j.get("suggestions", [])) >= 1
+                 and draft.startswith("编号,") and len(draft.splitlines()) - 1 == 3
+                 and len(low) == 1,
+                 f"解析 {j.get('count', 0)} 条，警告 {len(j.get('warnings', []))} 条，"
+                 f"归并建议 {len(j.get('suggestions', []))} 组，"
+                 f"C 画质 → 低置信度 {len(low)} 条，草稿 CSV {len(draft)} 字符")
     ev.note("工作区产物", json.dumps(client.get(f"/api/projects/{pid}/artifacts").json(),
                                     ensure_ascii=False)[:300])
     return ev
