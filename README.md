@@ -118,6 +118,7 @@ catgalaxy-factory/
 ├─ README.md                   本文件
 ├─ 交付报告.md                  第一轮完成清单 / 验收证据 / 已知限制 / 次日待办
 ├─ 第二轮冲刺报告.md             第二轮（F8-F11 + 健壮性 + 性能）的完成清单与实测数据
+├─ 第三轮冲刺报告.md             第三轮（增删行 / 感知哈希预排序 / 清理实跑 / 截图固化）的完成清单与实测数据
 ├─ pyproject.toml              依赖与 pytest 配置
 ├─ conftest.py                 测试夹具：临时 workspace、造图、造 CSV
 ├─ .github/workflows/ci.yml    CI：ubuntu + windows 双跑 pytest 与 acceptance demo2
@@ -143,11 +144,13 @@ catgalaxy-factory/
 ├─ static/                     控制台前端：index.html / app.js / style.css
 ├─ scripts/
 │  ├─ acceptance.py            验收脚本（demo2 / full76 / all）
-│  └─ cleanup.py               工作区回收（默认干跑，--apply 才动手；--exclude 是保护名单）
+│  ├─ cleanup.py               工作区回收（默认干跑，--apply 才动手；--exclude 是保护名单）
+│  └─ shot.py                  截图驱动：headless Edge + CDP，六张实证图一键复现
 ├─ tests/                      22 个测试文件、721 条用例
 ├─ docs/
 │  ├─ 跨校落地手册.md            普查到成品的完整 SOP + 脏 CSV 逐码处置清单
-│  └─ 验收证据-*.md             验收脚本产出的实测证据
+│  ├─ 验收证据-*.md             验收脚本产出的实测证据（浏览器实测含 §8 截图方法学）
+│  └─ 截图/                     六张浏览器实证图（scripts/shot.py 可复现）
 └─ workspace/                  运行期数据（已 gitignore）
    └─ {project_id}/
       ├─ project.json          项目元数据 + 操作日志（F7 的数据源）
@@ -226,4 +229,4 @@ CSV 没有的字段由工具推导：
 - 名册落在 `workspace/{pid}/roster.csv`。F10 在线编辑**会改写它**（原子替换，改单元格 / 增行 / 删行走同一个落盘出口，随包的 `data/猫咪名册.csv` 一并更新，每处改动记进操作日志）；要留一份完全未动的原件，请自己另存，或改用「本地改 CSV → 重新上传」。
 - 增行**不会替你编编号**：编号留空就报 `E_BAD_ID`，由人决定用哪个号（自动补号会让「弃用编号不复用」这条红线失效）。删行**不会删照片**：那张照片会以 `I_PHOTO_UNUSED` 浮到报告上，要不要清由人决定。
 
-当前状态以 [第二轮冲刺报告.md](第二轮冲刺报告.md) 为准（第一轮「次日待办」已全部实现）；[交付报告.md](交付报告.md) 保留第一轮的过程记录与红线自查。
+当前状态以 [第三轮冲刺报告.md](第三轮冲刺报告.md) 为准（第二轮 §七 待办已落地 4/7）；[第二轮冲刺报告.md](第二轮冲刺报告.md) 与 [交付报告.md](交付报告.md) 保留过程记录与红线自查，被推翻处均就地标注。
