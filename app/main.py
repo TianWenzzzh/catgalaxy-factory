@@ -15,10 +15,11 @@ from fastapi.staticfiles import StaticFiles
 
 from . import census_parser, image_proc, injector, packager, store, summary_writer
 from .config import IMAGE_EXTS, WORKSPACE, ensure_dirs
-from .csv_loader import decode_bytes, empty_template, parse_roster
+from .csv_loader import decode_bytes, empty_template, normalize_id, parse_roster
 from .image_proc import generate_default_map
 from .injector import build_photo_chunks, render_starmap
-from .models import CreateProjectRequest, GenerateRequest, ProjectMeta, ValidationReport
+from .models import (CalibData, CalibPoint, CalibUpdateRequest, CreateProjectRequest,
+                     GenerateRequest, ProjectMeta, ValidationReport)
 from .validate import passing_rows, report_markdown, validate
 
 app = FastAPI(title="喵星图工厂 CatGalaxy Factory", version="1.0.0")
@@ -79,6 +80,27 @@ def _ensure_map(pid: str) -> Path:
     return mp
 
 
+def _map_size(pid: str) -> Optional[tuple[int, int]]:
+    """底图真实像素尺寸，供模板按真实长宽比绘制（避免拉伸变形）。"""
+    mp = store.map_path(pid)
+    if not mp.exists():
+        return None
+    try:
+        from PIL import Image
+        with Image.open(mp) as im:
+            return int(im.width), int(im.height)
+    except Exception:
+        return None
+
+
+def _calib_positions(pid: str) -> Optional[dict]:
+    """项目已保存的人工标定 → {id: {"x":…, "y":…}}；未标定返回 None。"""
+    data = store.load_calib(pid)
+    if not data or not data.positions:
+        return None
+    return {k: v.model_dump() for k, v in data.positions.items()}
+
+
 def _photo_blobs(pid: str, names: Optional[set[str]] = None) -> dict[str, bytes]:
     out: dict[str, bytes] = {}
     for p in store.photo_files(pid):
@@ -112,6 +134,8 @@ def generate_bundle(pid: str, form: str = "relative", *,
     dirs = ensure_dirs(pid)
     _ensure_map(pid)
     map_bytes = store.map_path(pid).read_bytes()
+    map_size = _map_size(pid)
+    calib_override = _calib_positions(pid)
     html_name = packager.html_basename(meta.school)
     dest = _bundle_dir(pid, form)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -133,14 +157,16 @@ def generate_bundle(pid: str, form: str = "relative", *,
         chunks = build_photo_chunks(payload)
         html = render_starmap(school=meta.school, subtitle=meta.subtitle, rows=rows,
                               form=form, map_filename="assets/map.jpg",
-                              photo_script_names=[n for n, _ in chunks])
+                              photo_script_names=[n for n, _ in chunks],
+                              calib=calib_override, map_size=map_size)
         written = packager.build_inline_bundle(dest, html=html, html_name=html_name,
                                                chunks=chunks, roster_csv=roster_csv,
                                                report_md=md, summary_md=summary_md)
     else:
         html = render_starmap(school=meta.school, subtitle=meta.subtitle, rows=rows,
                               form=form, map_filename="assets/map.jpg",
-                              photo_script_names=[])
+                              photo_script_names=[],
+                              calib=calib_override, map_size=map_size)
         written = packager.build_relative_bundle(dest, html=html, html_name=html_name,
                                                  photos=photos, map_bytes=map_bytes,
                                                  roster_csv=roster_csv, report_md=md,
@@ -149,13 +175,15 @@ def generate_bundle(pid: str, form: str = "relative", *,
     zip_name = packager.zip_basename(meta.school)
     zip_path = packager.make_zip(dest, dirs["dist"] / f"{zip_name}.zip")
 
+    calib_stat = injector.calib_stats(rows, calib_override)
     meta.generated_form = form
     meta.has_roster = True
     meta.photo_count = len(store.photo_files(pid))
     meta.has_map = True
     store.log(meta, "生成星图",
               f"form={form} cats={len(rows)} photos={len(photos)} "
-              f"exclude_low={exclude_low_confidence} zip={zip_path.name}")
+              f"exclude_low={exclude_low_confidence} "
+              f"标定={calib_stat['manual']}/{calib_stat['total']} zip={zip_path.name}")
 
     missing_photos = sorted(referenced - set(photos))
     return {
@@ -167,6 +195,8 @@ def generate_bundle(pid: str, form: str = "relative", *,
         "missing_photos": missing_photos,
         "files": written,
         "stats": stats,
+        "calib": calib_stat,
+        "map_size": list(map_size) if map_size else None,
         "html_name": html_name,
         "preview_url": f"/bundle/{pid}/out/{form}/{quote(html_name)}",
         "zip_name": zip_path.name,
@@ -364,6 +394,68 @@ def artifacts(pid: str) -> dict:
             out[form] = [str(p.relative_to(d).as_posix()) for p in sorted(d.rglob("*"))
                          if p.is_file()]
     return {"zips": [{"name": n, "bytes": b} for n, b in dist], "bundles": out}
+
+
+# ---------- 路由：F8 底图标定 ----------
+
+@app.get("/api/projects/{pid}/calib")
+def get_calib(pid: str) -> dict:
+    """当前星位标定：人工标定优先，缺失的是算法推导值。"""
+    _meta_or_404(pid)
+    data = store.load_calib(pid)
+    report = _load_report(pid)
+    rows = report.rows if report else []
+    positions = {k: v.model_dump() for k, v in data.positions.items()} if data else {}
+    return {
+        "project_id": pid,
+        "source": data.source if data else "derived",
+        "updated_at": data.updated_at if data else "",
+        "note": data.note if data else "",
+        "positions": positions,
+        "stats": injector.calib_stats(rows, positions),
+        "map_size": list(_map_size(pid) or []) or None,
+        "ids": [normalize_id(r.id) or r.id for r in rows],
+    }
+
+
+@app.put("/api/projects/{pid}/calib")
+def put_calib(pid: str, req: CalibUpdateRequest) -> dict:
+    """保存人工标定。坐标为相对底图左上角的归一化值（0~1）。"""
+    meta = _meta_or_404(pid)
+    report = _load_report(pid) or _run_validation(meta)
+    known = {(normalize_id(r.id) or r.id) for r in report.rows}
+
+    bad = sorted(cid for cid, p in req.positions.items()
+                 if not (0.0 <= p.x <= 1.0 and 0.0 <= p.y <= 1.0))
+    if bad:
+        raise HTTPException(400, f"坐标必须是 0~1 的归一化值，越界：{', '.join(bad[:8])}")
+
+    existing = store.load_calib(pid)
+    merged = ({k: v.model_dump() for k, v in existing.positions.items()}
+              if (existing and req.merge) else {})
+    incoming = {k: v.model_dump() for k, v in req.positions.items()}
+    ignored = sorted(k for k in incoming if k not in known)
+    for k in ignored:
+        incoming.pop(k)
+    merged.update(incoming)
+
+    data = CalibData(positions={k: CalibPoint(**v) for k, v in merged.items()},
+                     source="manual", note=req.note)
+    store.save_calib(pid, data)
+    store.log(meta, "保存星位标定",
+              f"本次={len(incoming)} 累计={len(merged)} 忽略未知编号={len(ignored)}")
+    return {"saved": len(incoming), "total": len(merged),
+            "ignored_unknown_ids": ignored, "updated_at": data.updated_at,
+            "stats": injector.calib_stats(report.rows, merged)}
+
+
+@app.delete("/api/projects/{pid}/calib")
+def delete_calib(pid: str) -> dict:
+    meta = _meta_or_404(pid)
+    removed = store.clear_calib(pid)
+    if removed:
+        store.log(meta, "清除星位标定", "回到算法推导坐标")
+    return {"cleared": removed}
 
 
 # ---------- 路由：F6 / F7 ----------

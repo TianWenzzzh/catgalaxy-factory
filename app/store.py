@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import WORKSPACE, ensure_dirs, project_dir
-from .models import ProjectMeta
+from .models import CalibData, ProjectMeta
 
 _SLUG_BAD = re.compile(r'[\\/:*?"<>|\s]+')
 
@@ -88,6 +88,36 @@ def photo_names(pid: str) -> set[str]:
 
 def map_path(pid: str) -> Path:
     return project_dir(pid) / "assets" / "map.jpg"
+
+
+def calib_path(pid: str) -> Path:
+    return project_dir(pid) / "calib.json"
+
+
+def load_calib(pid: str) -> Optional[CalibData]:
+    p = calib_path(pid)
+    if not p.exists():
+        return None
+    try:
+        return CalibData.model_validate(json.loads(p.read_text(encoding="utf-8")))
+    except Exception:
+        return None
+
+
+def save_calib(pid: str, calib: CalibData) -> CalibData:
+    ensure_dirs(pid)
+    calib.updated_at = _now()
+    calib_path(pid).write_text(
+        json.dumps(calib.model_dump(), ensure_ascii=False, indent=2), encoding="utf-8")
+    return calib
+
+
+def clear_calib(pid: str) -> bool:
+    p = calib_path(pid)
+    if p.exists():
+        p.unlink()
+        return True
+    return False
 
 
 def safe_name(name: str, fallback: str = "校园") -> str:

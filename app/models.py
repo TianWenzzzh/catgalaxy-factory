@@ -83,3 +83,25 @@ class CreateProjectRequest(BaseModel):
     school: str = "示例校"
     subtitle: str = ""
     motto: str = ""
+
+
+class CalibPoint(BaseModel):
+    """归一化坐标，原点为底图左上角，x/y ∈ [0,1]。"""
+
+    x: float
+    y: float
+
+
+class CalibData(BaseModel):
+    """F8 · 人工在真实底图上标定出的星位，优先级高于算法推导坐标。"""
+
+    positions: dict[str, CalibPoint] = Field(default_factory=dict)
+    source: str = "manual"            # manual（人工标定）| derived（算法推导）
+    updated_at: str = ""
+    note: str = ""
+
+
+class CalibUpdateRequest(BaseModel):
+    positions: dict[str, CalibPoint] = Field(default_factory=dict)
+    note: str = ""
+    merge: bool = True                # False = 全量替换已存标定

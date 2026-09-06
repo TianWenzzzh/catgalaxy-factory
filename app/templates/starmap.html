@@ -90,6 +90,16 @@
     pointer-events:none;opacity:0;transition:opacity .12s;white-space:nowrap}
   #tip.on{opacity:1}
 
+  /* F8 标定模式 */
+  #sky.calib{cursor:crosshair}
+  #calibHint{position:fixed;top:74px;left:50%;transform:translateX(-50%);z-index:26;
+    display:none;gap:14px;align-items:center;padding:7px 14px;border-radius:999px;
+    font-size:11.5px;background:rgba(10,18,40,.94);border:1px solid rgba(125,232,216,.42);
+    color:var(--teal);backdrop-filter:blur(8px);white-space:nowrap;max-width:calc(100% - 36px)}
+  #calibHint.on{display:flex}
+  #calibHint b{color:var(--gold-soft);font-weight:600}
+  #calibCount{color:#9fb2e0}
+
   /* 分区标签开关时的空态 */
   #empty{position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:15;
     text-align:center;color:#7e92c4;font-size:13px;padding:20px;line-height:2}
@@ -134,6 +144,15 @@
   <span class="chip" id="btnNet" role="button" tabindex="0">⌁ 星链</span>
   <span class="chip" id="btnReset" role="button" tabindex="0">↺ 复位视角</span>
   <span class="chip" id="btnAll" role="button" tabindex="0">✦ 全部显示</span>
+  <span class="chip" id="btnCalib" role="button" tabindex="0"
+        title="开启后可把星星拖到底图上的真实地点，位置只存在本机浏览器">✎ 标定星位</span>
+  <span class="chip" id="btnCalibClear" role="button" tabindex="0"
+        title="清除本机标定，回到生成时的坐标">✕ 清除标定</span>
+</div>
+
+<div id="calibHint">
+  <span id="calibNow">标定模式：拖动星星到它真实出没的位置</span>
+  <span id="calibCount"></span>
 </div>
 
 <div id="empty">当前筛选下没有星星<br>点「✦ 全部显示」或清空搜索框</div>
@@ -178,7 +197,7 @@ const LS_KEY = "__LS_KEY__";
 const canvas = document.getElementById("sky"), ctx = canvas.getContext("2d");
 const DPR = Math.min(window.devicePixelRatio || 1, 2);
 let W = 0, H = 0;
-const MW = 1920, MH = 1239;                       // 底图逻辑尺寸
+let MW = __MAP_W__, MH = __MAP_H__;               // 底图逻辑尺寸（按真实底图注入，加载后再校正）
 const cam = { x: 0, y: 0, z: 1 };
 const mapImg = new Image(); let mapReady = false;
 
@@ -191,18 +210,32 @@ function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a
 const toScreen = (nx, ny) => ({ x: cam.x + nx * MW * cam.z, y: cam.y + ny * MH * cam.z });
 const toNorm = (sx, sy) => ({ x: (sx - cam.x) / (MW * cam.z), y: (sy - cam.y) / (MH * cam.z) });
 
-/* ---------- 位置：CALIB 优先，缺失时用 id 种子散开 ---------- */
+/* ---------- 位置：本机标定 > 生成时 CALIB > id 种子散开 ---------- */
 function basePos(cat){ const r = mulberry32(hashStr(cat.id)); return { x:.10+r()*.80, y:.14+r()*.72 }; }
 const POS = new Map();
+let USER = {};
+function loadUserPos(){
+  try{
+    const o = JSON.parse(localStorage.getItem(LS_KEY) || "{}");
+    USER = (o && typeof o === "object") ? o : {};
+  }catch(e){ USER = {}; }
+}
+function saveUserPos(){
+  try{ localStorage.setItem(LS_KEY, JSON.stringify(USER)); }catch(e){}
+}
 function catPos(c){
   let p = POS.get(c.id);
-  if(!p){ p = CALIB[c.id] || basePos(c); POS.set(c.id, p); }
+  if(!p){
+    const src = USER[c.id] || CALIB[c.id] || basePos(c);
+    p = { x: +src.x, y: +src.y };
+    POS.set(c.id, p);
+  }
   return p;
 }
 
 /* ---------- 状态 ---------- */
 const state = {
-  showZones: true, orbit: true, net: false,
+  showZones: true, orbit: true, net: false, calib: false,
   activeGroups: new Set(), query: "", hover: null, selected: null, t: 0,
 };
 function visible(c){
@@ -390,34 +423,47 @@ function frame(ts){
 }
 
 /* ---------- 交互 ---------- */
-let dragging = false, moved = false, lx = 0, ly = 0;
+let dragging = false, moved = false, lx = 0, ly = 0, dragCat = null;
 canvas.addEventListener("pointerdown", e => {
   dragging = true; moved = false; lx = e.clientX; ly = e.clientY;
+  dragCat = state.calib ? pick(e.clientX, e.clientY) : null;
   canvas.classList.add("drag"); canvas.setPointerCapture(e.pointerId);
 });
 canvas.addEventListener("pointermove", e => {
   if(dragging){
     const dx = e.clientX - lx, dy = e.clientY - ly;
     if(Math.abs(dx) + Math.abs(dy) > 3) moved = true;
-    cam.x += dx; cam.y += dy; lx = e.clientX; ly = e.clientY;
+    if(dragCat){
+      const n = toNorm(e.clientX, e.clientY);
+      const p = catPos(dragCat);
+      p.x = clamp(n.x, 0, 1); p.y = clamp(n.y, 0, 1);
+      USER[dragCat.id] = { x: +p.x.toFixed(4), y: +p.y.toFixed(4) };
+      updateCalibHint(dragCat);
+    }else{
+      cam.x += dx; cam.y += dy;
+    }
+    lx = e.clientX; ly = e.clientY;
     return;
   }
   const hit = pick(e.clientX, e.clientY);
   state.hover = hit;
-  canvas.style.cursor = hit ? "pointer" : "grab";
+  canvas.style.cursor = state.calib ? (hit ? "move" : "crosshair") : (hit ? "pointer" : "grab");
   const tip = document.getElementById("tip");
   if(hit){
-    tip.textContent = `${hit.name} · ${hit.rank || "未定衔"} · ${hit.photoCount || 1}张`;
+    tip.textContent = state.calib
+      ? `${hit.name} · 拖动到真实位置`
+      : `${hit.name} · ${hit.rank || "未定衔"} · ${hit.photoCount || 1}张`;
     tip.style.left = (e.clientX + 14) + "px";
     tip.style.top = (e.clientY - 10) + "px";
     tip.classList.add("on");
   }else tip.classList.remove("on");
 });
 addEventListener("pointerup", e => {
-  if(dragging && !moved){
+  if(dragging && !moved && !dragCat){
     const hit = pick(e.clientX, e.clientY);
     if(hit) openCard(hit); else closeCard();
   }
+  if(dragCat){ saveUserPos(); dragCat = null; }
   dragging = false; canvas.classList.remove("drag");
 });
 canvas.addEventListener("wheel", e => {
@@ -543,11 +589,70 @@ document.getElementById("btnAll").addEventListener("click", () => {
   closeCard();
 });
 
+/* ---------- F8 标定模式 ---------- */
+function updateCalibHint(c){
+  const now = document.getElementById("calibNow");
+  const cnt = document.getElementById("calibCount");
+  now.textContent = c
+    ? `正在标定 ${c.id} ${c.name || ""} → x=${c.x.toFixed(3)} y=${c.y.toFixed(3)}`
+    : "标定模式：拖动星星到它真实出没的位置";
+  cnt.textContent = `本机已标定 ${Object.keys(USER).length} / ${CATS.length} 颗星`;
+}
+function setCalibMode(on){
+  state.calib = !!on;
+  document.getElementById("btnCalib").classList.toggle("on", state.calib);
+  document.getElementById("calibHint").classList.toggle("on", state.calib);
+  canvas.classList.toggle("calib", state.calib);
+  canvas.style.cursor = state.calib ? "crosshair" : "grab";
+  if(state.calib){ closeCard(); updateCalibHint(null); }
+}
+document.getElementById("btnCalib").addEventListener("click", () => setCalibMode(!state.calib));
+document.getElementById("btnCalibClear").addEventListener("click", () => {
+  USER = {}; POS.clear(); saveUserPos(); setCalibMode(false);
+});
+
+/* 控制台（父页面）通过该接口读出/写入人工标定，落盘到项目 calib.json */
+window.__catgalaxy = {
+  version: 1,
+  info(){
+    return { school: SCHOOL, cats: CATS.length, calibrated: Object.keys(USER).length,
+             mapW: MW, mapH: MH, calibMode: state.calib, lsKey: LS_KEY };
+  },
+  getCalib(){
+    const o = {};
+    for(const c of CATS){ const p = catPos(c); o[c.id] = { x:+p.x.toFixed(4), y:+p.y.toFixed(4) }; }
+    return o;
+  },
+  getUserCalib(){ return Object.assign({}, USER); },
+  setCalib(map, save){
+    let n = 0;
+    for(const [id, p] of Object.entries(map || {})){
+      if(!p || !isFinite(+p.x) || !isFinite(+p.y)) continue;
+      if(!CATS.some(c => c.id === id)) continue;
+      const q = { x: clamp(+p.x, 0, 1), y: clamp(+p.y, 0, 1) };
+      POS.set(id, { x: q.x, y: q.y }); USER[id] = q; n++;
+    }
+    if(save !== false) saveUserPos();
+    updateCalibHint(null);
+    return n;
+  },
+  clearCalib(){ USER = {}; POS.clear(); saveUserPos(); updateCalibHint(null); },
+  setCalibMode,
+};
+
 /* ---------- 启动 ---------- */
 function boot(){
+  loadUserPos();
   resize();
   buildLegend();
-  mapImg.onload = () => { mapReady = true; };
+  mapImg.onload = () => {
+    mapReady = true;
+    const nw = mapImg.naturalWidth, nh = mapImg.naturalHeight;
+    if(nw > 0 && nh > 0 && (nw !== MW || nh !== MH)){
+      MW = nw; MH = nh;          // 按底图真实长宽比绘制，避免拉伸变形
+      fitView();
+    }
+  };
   mapImg.onerror = () => { mapReady = false; };
   mapImg.src = PH(MAP_SRC);
   requestAnimationFrame(frame);

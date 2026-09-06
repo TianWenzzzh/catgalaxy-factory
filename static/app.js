@@ -58,6 +58,7 @@ $("#btnCreate").addEventListener("click", async () => {
     $("#genInfo").classList.remove("on");
     setStep(2, [1]);
     await refreshProjects();
+    await refreshCalib();
     toast(`项目「${school}」已创建`, "ok");
   } catch (e) { toast("创建失败：" + e.message, "err"); }
 });
@@ -86,6 +87,7 @@ $("#projList").addEventListener("change", async (e) => {
     $("#mapState").textContent = d.has_map ? "已就绪" : "自动生成";
     if (d.report) { state.report = d.report; renderReport(d.report); }
     setStep(3, [1, 2]);
+    await refreshCalib();
     toast("项目已载入", "ok");
   } catch (err) { toast("载入失败：" + err.message, "err"); }
 });
@@ -248,6 +250,7 @@ $("#btnGenerate").addEventListener("click", async () => {
       <div><span class="k">分区</span> ${zones || "—"}</div>
       <div><span class="k">毛色</span> ${coats || "—"}</div>
       <div><span class="k">文件</span> ${escapeHtml(r.html_name)} + ${r.files.length - 1} 个附件</div>
+      ${r.calib ? `<div><span class="k">星位</span> 人工标定 <b>${r.calib.manual}</b> / ${r.calib.total} 颗${r.calib.manual ? "" : "（未标定 → 星星只按分区聚拢，不对应真实地理位置，可用下方 F8 面板标定）"}</div>` : ""}
       ${r.missing_photos.length ? `<div style="color:var(--red)">缺照片 ${r.missing_photos.length} 张：${r.missing_photos.slice(0, 5).map(escapeHtml).join(", ")}</div>` : ""}
       <div><span class="k">包名</span> <b>${escapeHtml(r.zip_name)}</b></div>`;
     $("#btnPreview").disabled = false;
@@ -255,6 +258,7 @@ $("#btnGenerate").addEventListener("click", async () => {
     $("#zipHint").textContent = `已就绪：${r.zip_name}（${(r.zip_bytes / 1024 / 1024).toFixed(2)} MB）`;
     loadPreview(r.preview_url);
     setStep(5, [1, 2, 3, 4]);
+    await refreshCalib();
     toast(`星图已生成：${r.cats} 颗星`, "ok");
   } catch (e) {
     toast("生成失败：" + e.message, "err");
@@ -339,6 +343,81 @@ $("#btnCensusCsv").addEventListener("click", () => {
   a.click();
   URL.revokeObjectURL(a.href);
   toast("草稿 CSV 已下载，可直接作为名册上传", "ok");
+});
+
+/* ---------- F8 星位标定 ---------- */
+function calibApi() {
+  const w = $("#frame").contentWindow;
+  return (w && w.__catgalaxy) || null;
+}
+
+async function refreshCalib() {
+  if (!state.pid) { $("#calibState").textContent = "尚未选择项目"; return; }
+  try {
+    const j = await api(`/api/projects/${state.pid}/calib`);
+    state.calib = j;
+    const s = j.stats || {};
+    const bits = [`名册 ${s.total || 0} 颗星`,
+                  `已人工标定 ${s.manual || 0} 颗`,
+                  `算法推导 ${s.derived || 0} 颗`,
+                  j.source === "manual" ? `来源：人工（${escapeHtml(j.updated_at || "")}）` : "来源：算法推导"];
+    $("#calibState").innerHTML = bits.join(" ｜ ");
+    $("#btnCalibSave").disabled = !(s.total > 0);
+    $("#btnCalibClear").disabled = j.source !== "manual";
+  } catch (e) {
+    $("#calibState").textContent = "标定状态读取失败：" + e.message;
+  }
+}
+
+$("#btnCalibMode").addEventListener("click", () => {
+  const c = calibApi();
+  if (!c) { toast("请先生成星图并载入预览，再开启标定模式", "err"); return; }
+  const on = !c.info().calibMode;
+  c.setCalibMode(on);
+  $("#btnCalibMode").textContent = on ? "✎ 标定模式已开启（点击关闭）" : "✎ 在预览里开启标定模式";
+  toast(on ? "标定模式已开启：在预览里把星星拖到它真实出没的位置" : "标定模式已关闭", "ok");
+});
+
+$("#btnCalibSave").addEventListener("click", async () => {
+  if (!needPid()) return;
+  const c = calibApi();
+  if (!c) { toast("预览未载入，读不到星位。请先生成星图", "err"); return; }
+  const onlyDragged = $("#calibOnlyDragged").checked;
+  const positions = onlyDragged ? c.getUserCalib() : c.getCalib();
+  const n = Object.keys(positions).length;
+  if (!n) {
+    toast(onlyDragged ? "你还没有拖动过任何星星" : "预览里没有星位可保存", "err");
+    return;
+  }
+  try {
+    const r = await api(`/api/projects/${state.pid}/calib`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ positions, note: onlyDragged ? "预览中人工拖动" : "固化当前全部星位" }),
+    });
+    toast(`已保存 ${r.saved} 颗星的标定（项目累计 ${r.total} 颗）· 记得重新生成星图`, "ok");
+    if (r.ignored_unknown_ids && r.ignored_unknown_ids.length) {
+      toast(`名册里不存在，已忽略：${r.ignored_unknown_ids.join(", ")}`, "err");
+    }
+    await refreshCalib();
+  } catch (e) { toast("保存标定失败：" + e.message, "err"); }
+});
+
+$("#btnCalibClear").addEventListener("click", async () => {
+  if (!needPid()) return;
+  try {
+    await api(`/api/projects/${state.pid}/calib`, { method: "DELETE" });
+    const c = calibApi(); if (c) c.clearCalib();
+    toast("项目标定已清除，回到算法推导坐标", "ok");
+    await refreshCalib();
+  } catch (e) { toast("清除失败：" + e.message, "err"); }
+});
+
+$("#btnCalibLocalClear").addEventListener("click", () => {
+  const c = calibApi();
+  if (!c) { toast("预览未载入", "err"); return; }
+  c.clearCalib();
+  toast("已清除预览的本机标定（项目里的 calib.json 未动）", "ok");
 });
 
 /* ---------- 启动 ---------- */

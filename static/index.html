@@ -121,6 +121,25 @@
           <div class="frameEmpty" id="frameEmpty">生成后在此即时预览<br><small>拖拽平移 · 滚轮缩放 · 点星看档案</small></div>
         </div>
       </div>
+
+      <div class="card" id="c7">
+        <h2><span class="no">F8</span>星位标定 · 让星星落在真实地点</h2>
+        <p class="hint">算法只保证「同区聚拢、区间分开」。要让星星对上猫真实出没的地理位置，
+          需在校园底图上人工点位：先在预览里开启标定模式，拖动星星到正确位置，再保存回项目。</p>
+        <div class="row">
+          <button id="btnCalibMode">✎ 在预览里开启标定模式</button>
+          <button id="btnCalibSave" class="primary" disabled>⬆ 保存标定到项目</button>
+        </div>
+        <label class="check"><input type="checkbox" id="calibOnlyDragged" checked>
+          只保存我拖动过的星星（不勾则把当前全部星位固化下来）</label>
+        <div class="row">
+          <button id="btnCalibClear" disabled>↺ 清除项目标定</button>
+          <button id="btnCalibLocalClear">✕ 清除预览的本机标定</button>
+        </div>
+        <p class="hint" id="calibState">尚未生成预览</p>
+        <p class="hint">标定写入项目的 <code>calib.json</code>；<b>改完要重新点「生成星图」</b>，
+          坐标才会烘焙进 zip 产物。</p>
+      </div>
     </section>
   </div>
 </main>

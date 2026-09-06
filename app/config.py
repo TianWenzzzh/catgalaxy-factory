@@ -11,6 +11,8 @@ WORKSPACE = ROOT / "workspace"
 MAX_PHOTO_SIDE = 1200
 MAX_PHOTO_BYTES = 200 * 1024
 MAX_MAP_SIDE = 1920
+DEFAULT_MAP_W = 1920                  # 底图逻辑尺寸兜底值（无真实底图时使用）
+DEFAULT_MAP_H = 1239
 PHOTO_CHUNK_BYTES = 1_500_000  # base64 分片大小（inline 形态）
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
