@@ -335,6 +335,81 @@ def test_main_can_reclaim_orphan_directories(ws):
     assert not orphan.exists(), "工作区里的非项目目录属于垃圾，应该一并回收"
 
 
+# ---------- cleanup：--exclude（保护名单） ----------
+
+def test_parse_excludes_splits_commas_and_repeats():
+    assert cleanup.parse_excludes(["甲校, 乙校", "丙校"]) == ["甲校", "乙校", "丙校"]
+    assert cleanup.parse_excludes(None) == []
+    assert cleanup.parse_excludes(["  ,  ", ""]) == []
+
+
+def test_select_skips_excluded_by_id_or_by_school(ws):
+    old_a = make_project("甲校", age_days=10)
+    old_b = make_project("乙校", age_days=10)
+    old_c = make_project("丙校", age_days=10)
+    rows = cleanup.scan()
+    picked = cleanup.select(rows, 7 * 86400, 0, time.time(),
+                            excludes=[old_a, "乙校"])
+    assert [r["id"] for r in picked] == [old_c], "按 id 和按学校名都该能排除"
+
+
+def test_select_exclude_matches_a_substring(ws):
+    keep = make_project("中北大学", age_days=10)
+    drop = make_project("清华大学", age_days=10)
+    picked = cleanup.select(cleanup.scan(), 7 * 86400, 0, time.time(), excludes=["中北"])
+    assert [r["id"] for r in picked] == [drop]
+    assert keep not in [r["id"] for r in picked]
+
+
+def test_select_exclude_also_spares_a_non_project_directory(ws):
+    orphan = ws / "证据残留目录"
+    orphan.mkdir()
+    old = time.time() - 10 * 86400
+    os.utime(orphan, (old, old))
+    pid = make_project("甲校", age_days=10)
+    picked = cleanup.select(cleanup.scan(), 7 * 86400, 0, time.time(),
+                            excludes=["证据残留"])
+    assert [r["id"] for r in picked] == [pid]
+
+
+def test_main_exclude_spares_the_project_even_with_apply(ws, capsys):
+    keep = make_project("被报告引用的校", age_days=30)
+    drop = make_project("跑测留下的校", age_days=30)
+    assert cleanup.main(["--before", "7d", "--apply", "--exclude", keep]) == 0
+    assert store.project_dir(keep).exists(), "保护名单里的项目绝不能被删"
+    assert not store.project_dir(drop).exists()
+    out = capsys.readouterr().out
+    assert keep in out and "排除" in out
+
+
+def test_main_exclude_shows_up_in_json(ws, capsys):
+    keep = make_project("甲校", age_days=30)
+    make_project("乙校", age_days=30)
+    assert cleanup.main(["--before", "7d", "--apply", "--exclude", "甲校", "--json"]) == 0
+    j = json.loads(capsys.readouterr().out)
+    assert j["exclude_patterns"] == ["甲校"]
+    assert j["excluded"] == [keep]
+    assert j["unused_excludes"] == []
+    assert j["deleted"] == 1
+
+
+def test_main_dry_run_warns_when_an_exclude_matches_nothing(ws, capsys):
+    make_project("甲校", age_days=30)
+    assert cleanup.main(["--before", "7d", "--exclude", "写错的名字"]) == 0
+    err = capsys.readouterr().err
+    assert "写错的名字" in err and "没匹配到" in err
+
+
+def test_main_apply_refuses_when_an_exclude_matches_nothing(ws, capsys):
+    """保护名单对不上就别动手：那说明用户想保的东西不在（写错了或已被清掉），
+    此时照删等于把「我以为保住了」变成一句空话，而删除是不可逆的。"""
+    pid = make_project("甲校", age_days=30)
+    assert cleanup.main(["--before", "7d", "--apply", "--exclude", "写错的名字"]) == 2
+    err = capsys.readouterr().err
+    assert "拒绝执行" in err and "没匹配到" in err
+    assert store.project_dir(pid).exists(), "被拒之后一个都不该删"
+
+
 def test_delete_reports_no_errors_on_a_clean_removal(ws):
     pid = make_project("甲校")
     assert cleanup.delete(pid) == []

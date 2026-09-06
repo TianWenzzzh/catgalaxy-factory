@@ -3,11 +3,17 @@
     python scripts/cleanup.py --before 7d              # 干跑：只列出会被清掉的
     python scripts/cleanup.py --before 7d --apply      # 真删
     python scripts/cleanup.py --before 24h --keep-latest 3 --apply
+    python scripts/cleanup.py --before 7d --exclude 1788707789-示例校 --apply
     python scripts/cleanup.py --stats                  # 只看占用，不筛时间
     python scripts/cleanup.py --before 7d --json       # 机器可读输出
 
 默认干跑，必须显式 --apply 才动手。判定依据是项目目录的 mtime（比 meta 里的
 updated_at 更可靠：照片被重压过、产物被重新生成过，目录时间都会变）。
+
+--exclude 是保护名单，可以重复给也可以逗号分隔，按子串匹配项目 id 或学校名
+（和 /api/projects?q= 一个语义，记不全 id 也能用）。名单里有一项没匹配到任何
+项目时：干跑只警告，--apply 直接拒绝执行——想保的东西对不上还照删，等于把
+「我以为保住了」变成一句空话，而删除是不可逆的。
 
 红线：只认项目内的 workspace/，路径不在项目目录下就直接拒绝执行；E 盘、
 D:\\code、D:\\校园基米skill 一律不碰。
@@ -88,10 +94,37 @@ def scan(with_size: bool = True) -> list[dict]:
     return rows
 
 
-def select(rows: list[dict], before_s: int, keep_latest: int, now: float) -> list[dict]:
-    """挑出「超过 before_s 没动过」的项目，并保住最近 keep_latest 个。"""
+def parse_excludes(values: list[str] | None) -> list[str]:
+    """--exclude 可以重复给，也可以逗号分隔；空串丢掉，去重但保留顺序。"""
+    out: list[str] = []
+    for chunk in values or []:
+        for pat in str(chunk).split(","):
+            pat = pat.strip()
+            if pat and pat not in out:
+                out.append(pat)
+    return out
+
+
+def row_matches(row: dict, patterns: list[str]) -> bool:
+    """按子串匹配项目 id 或学校名——和 /api/projects?q= 一个语义。
+
+    非项目目录（工作区里的残留文件夹）学校名为空，此时就只匹配目录名，
+    一样能被保住：证据不一定是个正经项目。
+    """
+    hay = f"{row['id']} {row.get('school') or ''}"
+    return any(p in hay for p in patterns)
+
+
+def select(rows: list[dict], before_s: int, keep_latest: int, now: float,
+           excludes: list[str] | tuple[str, ...] = ()) -> list[dict]:
+    """挑出「超过 before_s 没动过」的项目，并保住最近 keep_latest 个。
+
+    保护名单先过一遍：名单上的行连候选都进不去，跟多久没动、是不是最近都无关。
+    """
+    pats = list(excludes or [])
+    pool = rows if not pats else [r for r in rows if not row_matches(r, pats)]
     cutoff = now - before_s
-    stale = [r for r in rows if r["mtime"] < cutoff]
+    stale = [r for r in pool if r["mtime"] < cutoff]
     if keep_latest > 0:
         recent = {r["id"] for r in sorted(rows, key=lambda r: -r["mtime"])[:keep_latest]}
         stale = [r for r in stale if r["id"] not in recent]
@@ -132,6 +165,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--before", help="时间窗，如 7d / 24h / 2w；不填则只出统计")
     ap.add_argument("--keep-latest", type=int, default=0,
                     help="无论多久没动，都保住最近的 N 个项目")
+    ap.add_argument("--exclude", action="append", default=None,
+                    help="保护名单：按子串匹配项目 id 或学校名，可重复给或用逗号分隔")
     ap.add_argument("--apply", action="store_true", help="真删（默认只干跑）")
     ap.add_argument("--no-size", action="store_true", help="跳过体积统计，扫得更快")
     ap.add_argument("--stats", action="store_true", help="只看工作区占用概况")
@@ -183,7 +218,20 @@ def main(argv: list[str] | None = None) -> int:
                 print("\n加 --before 7d 看哪些该清了；加 --apply 才真删。")
         return 0
 
-    doomed = select(rows, before_s, args.keep_latest, now)
+    excludes = parse_excludes(args.exclude)
+    spared = [r for r in rows if excludes and row_matches(r, excludes)]
+    unused = [p for p in excludes if not any(row_matches(r, [p]) for r in rows)]
+    if unused:
+        listed = "、".join(f"「{p}」" for p in unused)
+        if args.apply:
+            print(f"拒绝执行：排除项 {listed} 没匹配到任何项目（写错了？还是早被清掉了？）。",
+                  file=sys.stderr)
+            print("保护名单对不上还照删，等于把「我以为保住了」变成一句空话——删除不可逆。",
+                  file=sys.stderr)
+            return 2
+        print(f"⚠ 排除项 {listed} 没匹配到任何项目，检查一下是不是写错了。", file=sys.stderr)
+
+    doomed = select(rows, before_s, args.keep_latest, now, excludes)
     reclaim = sum(r["bytes"] for r in doomed)
     failures: list[dict] = []
     deleted_ids: set[str] = set()
@@ -198,6 +246,9 @@ def main(argv: list[str] | None = None) -> int:
 
     result = {"before": args.before, "before_seconds": before_s,
               "keep_latest": args.keep_latest, "applied": args.apply,
+              "exclude_patterns": excludes,
+              "excluded": [r["id"] for r in spared],
+              "unused_excludes": unused,
               "candidates": len(doomed), "bytes": reclaim,
               "bytes_human": fmt_bytes(reclaim),
               "deleted": len(deleted_ids),
@@ -210,7 +261,11 @@ def main(argv: list[str] | None = None) -> int:
     else:
         verb = "已删除" if args.apply else "将被删除（干跑）"
         print(f"--before {args.before}（{before_s // 3600} 小时没动过）"
-              + (f" · 保住最近 {args.keep_latest} 个" if args.keep_latest else ""))
+              + (f" · 保住最近 {args.keep_latest} 个" if args.keep_latest else "")
+              + (f" · 排除 {len(spared)} 个" if excludes else ""))
+        if spared:
+            print("  保护名单保住：" + "、".join(
+                r["id"] + (f"（{r['school']}）" if r["school"] else "") for r in spared))
         if not doomed:
             print(f"  没有符合条件的项目。工作区现有 {len(projects)} 个项目。")
         else:
