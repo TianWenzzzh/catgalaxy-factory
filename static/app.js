@@ -4,7 +4,8 @@
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 
-const state = { pid: null, school: "示例校", report: null, generated: null, draftCsv: "" };
+const state = { pid: null, school: "示例校", report: null, generated: null, draftCsv: "",
+                merge: null, roster: null, mergeLoaded: false };
 
 /* ---------- 提示 ---------- */
 let toastTimer = null;
@@ -56,6 +57,11 @@ $("#btnCreate").addEventListener("click", async () => {
     $("#btnPreview").disabled = true; $("#btnDownload").disabled = true;
     $("#frame").src = "about:blank"; $(".frameWrap").classList.remove("loaded");
     $("#genInfo").classList.remove("on");
+    $("#mergeList").classList.remove("on"); $("#mergeList").innerHTML = "";
+    $("#mergeState").textContent = "尚未扫描";
+    $("#editList").classList.remove("on"); $("#editList").innerHTML = "";
+    pending.clear(); updateApplyBtn();
+    state.merge = null; state.roster = null; state.mergeLoaded = false;
     setStep(2, [1]);
     await refreshProjects();
     await refreshCalib();
@@ -88,6 +94,7 @@ $("#projList").addEventListener("change", async (e) => {
     if (d.report) { state.report = d.report; renderReport(d.report); }
     setStep(3, [1, 2]);
     await refreshCalib();
+    await scanMerge();
     toast("项目已载入", "ok");
   } catch (err) { toast("载入失败：" + err.message, "err"); }
 });
@@ -162,6 +169,7 @@ $("#btnValidate").addEventListener("click", async () => {
     const r = await api(`/api/projects/${state.pid}/validate`, { method: "POST" });
     state.report = r; renderReport(r);
     setStep(3, [1, 2]);
+    await scanMerge();
     toast(r.summary.ok ? "校验通过，可以生成星图" : `校验发现 ${r.summary.error_count} 个错误`,
           r.summary.ok ? "ok" : "err");
   } catch (e) { toast("校验失败：" + e.message, "err"); }
@@ -418,6 +426,205 @@ $("#btnCalibLocalClear").addEventListener("click", () => {
   if (!c) { toast("预览未载入", "err"); return; }
   c.clearCalib();
   toast("已清除预览的本机标定（项目里的 calib.json 未动）", "ok");
+});
+
+/* ---------- F9 归并工作台 ---------- */
+const VERDICTS = [["same", "同一只猫"], ["different", "不是同一只"], ["unsure", "存疑待复核"]];
+const verdictLabel = (v) => (VERDICTS.find((x) => x[0] === v) || [, v])[1];
+
+async function scanMerge() {
+  if (!state.pid) return;
+  try {
+    const j = await api(`/api/projects/${state.pid}/merge`);
+    state.merge = j; state.mergeLoaded = true;
+    const s = j.stats;
+    $("#mergeState").innerHTML =
+      `候选 <b>${s.groups}</b> 组 / ${s.members} 行 ｜ 已判定 <b>${s.decided}</b>` +
+      `（同猫 ${s.same} · 不同 ${s.different} · 存疑 ${s.unsure}）｜ 待判定 ${s.pending}` +
+      (s.stale_gids.length
+        ? ` ｜ <span style="color:var(--gold)">名册已改动，${s.stale_gids.length} 条旧判定失效</span>` : "");
+    renderMerge(j.groups);
+  } catch (e) {
+    state.mergeLoaded = false;
+    $("#mergeState").textContent = "扫描失败：" + e.message;
+  }
+}
+
+function renderMerge(groups) {
+  const box = $("#mergeList");
+  box.classList.add("on");
+  if (!groups.length) {
+    box.innerHTML = `<p class="empty">没有疑似重复建档的候选组 🎉</p>`;
+    return;
+  }
+  box.innerHTML = groups.slice(0, 40).map((g) => {
+    const d = g.decision;
+    return `
+    <div class="mgroup ${d ? "decided" : ""}" data-gid="${escapeHtml(g.gid)}">
+      <div class="mgHead">
+        <b>${g.kind === "same-photo" ? "共用照片" : "同色同区"}</b>
+        <span class="score">可疑度 ${(g.score * 100).toFixed(0)}%</span>
+        <code class="cd">${escapeHtml(g.gid)}</code>
+        ${d ? `<span class="lv info">已判定：${verdictLabel(d.verdict)}</span>` : ""}
+      </div>
+      <div class="mgWhy">${escapeHtml(g.reason)}</div>
+      <div class="mgCards">${g.members.map((m) => `
+        <div class="mcard">
+          ${m.photo_url
+            ? `<img src="${escapeHtml(m.photo_url)}" alt="${escapeHtml(m.name || m.id)}" loading="lazy">`
+            : `<div class="nophoto">照片未上传<br><small>${escapeHtml(m.photo || "名册未填")}</small></div>`}
+          <div class="mcBody">
+            <b>${escapeHtml(m.name || "(未命名)")}</b><code class="cd">${escapeHtml(m.id)}</code>
+            <div>${escapeHtml(m.coat || "毛色未记")} ｜ ${escapeHtml(m.area || "区域未填")}</div>
+            <div class="feat">${escapeHtml(m.features || "无特征描述")}</div>
+            <div class="meta">置信度 ${escapeHtml(m.confidence || "—")} ｜ 照片 ${m.photo_count || 0} 张 ｜ 第 ${m.line} 行</div>
+            <label class="pick"><input type="radio" name="keep-${escapeHtml(g.gid)}" value="${escapeHtml(m.id)}"
+              ${d && d.keep === m.id ? "checked" : ""}> 判同猫时保留这只</label>
+            <label class="pick"><input type="checkbox" name="drop-${escapeHtml(g.gid)}" value="${escapeHtml(m.id)}"
+              ${d && (d.drop || []).includes(m.id) ? "checked" : ""}> 弃用此编号</label>
+          </div>
+        </div>`).join("")}</div>
+      <div class="mgJudge">
+        ${VERDICTS.map(([v, l]) =>
+          `<button data-v="${v}" class="${d && d.verdict === v ? "on" : ""}">${l}</button>`).join("")}
+        <input class="reason" placeholder="理由（判同猫/不同猫必填，会写进归并决策摘要）"
+               value="${escapeHtml(d ? d.reason : "")}">
+        <button class="primary save">保存判定</button>
+        ${d ? `<button class="undo">撤销</button>` : ""}
+      </div>
+    </div>`;
+  }).join("") + (groups.length > 40 ? `<p class="hint">…另有 ${groups.length - 40} 组未显示</p>` : "");
+
+  box.querySelectorAll(".mgroup").forEach((el) => {
+    const gid = el.dataset.gid;
+    const vbtns = [...el.querySelectorAll(".mgJudge button[data-v]")];
+    vbtns.forEach((b) => b.addEventListener("click", () => {
+      vbtns.forEach((x) => x.classList.remove("on"));
+      b.classList.add("on");
+    }));
+    el.querySelector(".save").addEventListener("click", async () => {
+      const on = el.querySelector(".mgJudge button[data-v].on");
+      if (!on) { toast("先选一个判定结论", "err"); return; }
+      const verdict = on.dataset.v;
+      const keepEl = el.querySelector(`input[name="keep-${gid}"]:checked`);
+      const body = {
+        gid, verdict,
+        keep: keepEl ? keepEl.value : "",
+        drop: [...el.querySelectorAll(`input[name="drop-${gid}"]:checked`)].map((x) => x.value),
+        reason: el.querySelector(".reason").value.trim(),
+      };
+      try {
+        await api(`/api/projects/${state.pid}/merge`, {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        toast(`已记录：${verdictLabel(verdict)}` +
+              `${body.keep ? ` · 保留 ${body.keep}` : ""}` +
+              `${body.drop.length ? ` · 弃用 ${body.drop.join(",")}` : ""}`, "ok");
+        await scanMerge();
+      } catch (e) { toast("判定被拒：" + e.message, "err"); }
+    });
+    const undo = el.querySelector(".undo");
+    if (undo) undo.addEventListener("click", async () => {
+      try {
+        await api(`/api/projects/${state.pid}/merge/${encodeURIComponent(gid)}`,
+                  { method: "DELETE" });
+        toast("已撤销这条判定", "ok");
+        await scanMerge();
+      } catch (e) { toast("撤销失败：" + e.message, "err"); }
+    });
+  });
+}
+
+$("#btnMergeScan").addEventListener("click", async () => {
+  if (!needPid()) return;
+  $("#mergeState").textContent = "扫描中…";
+  await scanMerge();
+});
+
+/* ---------- F10 名册在线编辑 ---------- */
+const pending = new Map();          // `${line}|${field}` → {line, field, value}
+
+function updateApplyBtn() {
+  $("#btnApplyEdits").textContent =
+    pending.size ? `应用 ${pending.size} 处改动并重跑校验` : "应用改动并重跑校验";
+  $("#btnApplyEdits").disabled = !pending.size;
+  $("#btnClearEdits").disabled = !pending.size;
+}
+
+function renderEditList(j) {
+  const rep = state.report || j.report;
+  const issues = (rep && rep.issues) || [];
+  const bad = new Map();
+  issues.forEach((i) => {
+    if (!i.line) return;
+    if (!bad.has(i.line)) bad.set(i.line, []);
+    bad.get(i.line).push(i);
+  });
+  const lines = [...bad.keys()].sort((a, b) => a - b).slice(0, 60);
+  const box = $("#editList");
+  box.classList.add("on");
+  if (!lines.length) {
+    box.innerHTML = `<p class="empty">没有带行号的问题项 —— 名册干净，无需在线修改。</p>`;
+    return;
+  }
+  box.innerHTML = lines.map((ln) => {
+    const row = j.rows[ln - j.line_offset] || [];
+    const its = bad.get(ln);
+    const hit = [...new Set(its.map((i) => i.field).filter((f) => f && j.mapping[f] !== undefined))];
+    const fields = hit.length ? hit : j.editable_columns;
+    return `<div class="editRow">
+      <div class="erHead">第 ${ln} 行 · <code class="cd">${escapeHtml(row[0] || "(编号空)")}</code>
+        ${its.map((i) => `<span class="lv ${i.level}">${i.code}</span>`).join(" ")}</div>
+      <div class="erMsg">${its.map((i) => escapeHtml(i.message)).join("<br>")}</div>
+      ${fields.map((f) => {
+        const cur = row[j.mapping[f]];
+        return `<label class="erField">${escapeHtml(f)}
+          <input data-line="${ln}" data-field="${escapeHtml(f)}" value="${escapeHtml(cur === undefined ? "" : cur)}">
+        </label>`;
+      }).join("")}
+    </div>`;
+  }).join("") + (bad.size > 60 ? `<p class="hint">…另有 ${bad.size - 60} 行有问题，先改前 60 行</p>` : "");
+
+  box.querySelectorAll("input").forEach((inp) => inp.addEventListener("input", () => {
+    pending.set(`${inp.dataset.line}|${inp.dataset.field}`,
+                { line: +inp.dataset.line, field: inp.dataset.field, value: inp.value });
+    inp.classList.add("dirty");
+    updateApplyBtn();
+  }));
+}
+
+$("#btnRosterEdit").addEventListener("click", async () => {
+  if (!needPid()) return;
+  try {
+    const j = await api(`/api/projects/${state.pid}/roster`);
+    state.roster = j;
+    renderEditList(j);
+    toast(`名册已载入：${j.rows.length} 行 · ${j.encoding}`, "ok");
+  } catch (e) { toast("读取名册失败：" + e.message, "err"); }
+});
+
+$("#btnApplyEdits").addEventListener("click", async () => {
+  if (!needPid() || !pending.size) return;
+  try {
+    const r = await api(`/api/projects/${state.pid}/roster`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ edits: [...pending.values()] }),
+    });
+    pending.clear(); updateApplyBtn();
+    if (r.report) { state.report = r.report; renderReport(r.report); renderEditList(state.roster); }
+    const rej = r.rejected || [];
+    toast(`已应用 ${r.applied.length} 处改动，错误剩 ${r.report ? r.report.summary.error_count : "—"}` +
+          (rej.length ? ` ｜ ${rej.length} 处被拒：${rej[0].why}` : ""), rej.length ? "err" : "ok");
+    await refreshCalib();
+    if (state.mergeLoaded) await scanMerge();
+  } catch (e) { toast("修改失败：" + e.message, "err"); }
+});
+
+$("#btnClearEdits").addEventListener("click", () => {
+  pending.clear(); updateApplyBtn();
+  $$("#editList input").forEach((i) => i.classList.remove("dirty"));
+  toast("已清空待改（名册文件未动）", "");
 });
 
 /* ---------- 启动 ---------- */

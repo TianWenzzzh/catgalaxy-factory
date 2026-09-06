@@ -112,6 +112,16 @@
       <div class="card" id="c3">
         <h2><span class="no">3</span>校验报告（F2）</h2>
         <div id="report" class="report"><p class="empty">还没有校验结果。上传名册与照片后点「运行校验」。</p></div>
+        <div class="editWrap">
+          <div class="row">
+            <button id="btnRosterEdit">✎ 在线修改名册（F10）</button>
+            <button id="btnApplyEdits" class="primary" disabled>应用改动并重跑校验</button>
+            <button id="btnClearEdits" disabled>清空待改</button>
+          </div>
+          <p class="hint">把有错误/警告的行直接摊开改，不用再「下载 CSV → 改 → 重新上传」绕一圈。
+            改动写回项目的 <code>roster.csv</code> 与 <code>data/猫咪名册.csv</code>（带 BOM，Excel 不乱码）。</p>
+          <div id="editList" class="editlist"></div>
+        </div>
       </div>
 
       <div class="card grow">
@@ -139,6 +149,18 @@
         <p class="hint" id="calibState">尚未生成预览</p>
         <p class="hint">标定写入项目的 <code>calib.json</code>；<b>改完要重新点「生成星图」</b>，
           坐标才会烘焙进 zip 产物。</p>
+      </div>
+
+      <div class="card" id="c8">
+        <h2><span class="no">F9</span>归并工作台 · 疑似同一只猫</h2>
+        <p class="hint">两路召回候选组：<b>共用同一张代表照片</b>（最可能是重复建档）、
+          <b>同毛色 + 同出没区域且特征描述相似</b>。左右并排看图后判定，理由会写进操作日志，
+          并自动出现在《归并决策摘要》第六节——数据红线要求每条取舍都留痕。</p>
+        <div class="row">
+          <button id="btnMergeScan" class="primary">⌕ 扫描候选组</button>
+          <span class="hint" id="mergeState">尚未扫描</span>
+        </div>
+        <div id="mergeList" class="merge"></div>
       </div>
     </section>
   </div>
