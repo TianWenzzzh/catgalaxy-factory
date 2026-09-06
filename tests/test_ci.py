@@ -80,6 +80,19 @@ def test_install_command_matches_declared_dev_extra(wf):
     assert "pyyaml" in dev.lower(), "本文件 import yaml，dev extra 里必须声明 pyyaml"
 
 
+def test_shot_script_direct_imports_are_declared():
+    """scripts/shot.py 直接 import websockets，dev extra 里必须声明。
+
+    它现在「碰巧能用」只是 uvicorn[standard] 的传递依赖；哪天 extra 一变，
+    截图脚本当场 ImportError 且原因难找。直接 import 就要声明，与上面 pyyaml 同源。
+    """
+    shot = (ROOT / "scripts" / "shot.py").read_text(encoding="utf-8")
+    assert "import websockets" in shot, "shot.py 不再直接用 websockets 时，删掉本测试"
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    dev = re.search(r"dev\s*=\s*\[(.*?)\]", pyproject, re.S).group(1).lower()
+    assert "websockets" in dev, "shot.py 直接 import websockets，dev extra 里必须声明"
+
+
 # ---------- 验收脚本的 E 盘兜底 ----------
 
 def test_skeleton_csv_falls_back_when_the_e_drive_is_absent(monkeypatch):
