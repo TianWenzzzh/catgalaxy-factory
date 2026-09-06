@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import WORKSPACE, ensure_dirs, project_dir
-from .models import CalibData, ProjectMeta
+from .models import CalibData, MergeBook, ProjectMeta
 
 _SLUG_BAD = re.compile(r'[\\/:*?"<>|\s]+')
 
@@ -118,6 +118,40 @@ def clear_calib(pid: str) -> bool:
         p.unlink()
         return True
     return False
+
+
+def now() -> str:
+    return _now()
+
+
+def merge_path(pid: str) -> Path:
+    return project_dir(pid) / "merge.json"
+
+
+def load_merge(pid: str) -> MergeBook:
+    p = merge_path(pid)
+    if not p.exists():
+        return MergeBook()
+    try:
+        return MergeBook.model_validate(json.loads(p.read_text(encoding="utf-8")))
+    except Exception:
+        return MergeBook()
+
+
+def save_merge(pid: str, book: MergeBook) -> MergeBook:
+    ensure_dirs(pid)
+    merge_path(pid).write_text(
+        json.dumps(book.model_dump(), ensure_ascii=False, indent=2), encoding="utf-8")
+    return book
+
+
+def drop_merge(pid: str, gid: str) -> bool:
+    book = load_merge(pid)
+    if gid not in book.decisions:
+        return False
+    del book.decisions[gid]
+    save_merge(pid, book)
+    return True
 
 
 def safe_name(name: str, fallback: str = "校园") -> str:

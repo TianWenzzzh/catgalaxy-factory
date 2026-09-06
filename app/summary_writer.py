@@ -3,12 +3,15 @@ from __future__ import annotations
 
 from datetime import date
 
-from .models import ProjectMeta, ValidationReport
+from .models import MergeBook, ProjectMeta, ValidationReport
 from .star_mapper import coat_stats, id_gaps, zone_stats
+
+VERDICT_LABEL = {"same": "同一只猫", "different": "不是同一只", "unsure": "存疑待复核"}
 
 
 def build_summary(meta: ProjectMeta, report: ValidationReport | None = None,
-                  generated: dict | None = None) -> str:
+                  generated: dict | None = None,
+                  merge: MergeBook | None = None) -> str:
     """输出 Markdown 摘要骨架（对齐 12_跨校复制包 的《归并决策摘要》体例）。"""
     today = date.today().isoformat()
     lines: list[str] = [
@@ -89,7 +92,23 @@ def build_summary(meta: ProjectMeta, report: ValidationReport | None = None,
         lines.append("- 未发现同一张代表照片被多只猫引用。")
     lines.append("")
 
-    lines += ["## 六、操作记录（自动采集）", ""]
+    lines += ["## 六、归并判定记录（人工留痕）", ""]
+    decisions = sorted(merge.decisions.values(), key=lambda d: d.updated_at) if merge else []
+    if decisions:
+        lines += ["| 候选组 | 类型 | 判定 | 保留 | 弃用 | 理由 |",
+                  "|---|---|---|---|---|---|"]
+        for d in decisions:
+            lines.append(
+                f"| `{d.gid}` | {'共用照片' if d.kind == 'same-photo' else '同色同区'} | "
+                f"{VERDICT_LABEL.get(d.verdict, d.verdict)} | {d.keep or '—'} | "
+                f"{', '.join(d.drop) or '—'} | {d.reason or '—'} |")
+        lines += ["", f"> 共 {len(decisions)} 条判定。判定只记录取舍与理由，"
+                      f"编号的实际合并/弃用请在名册 CSV 里落笔，弃用编号留空不复用。"]
+    else:
+        lines.append("- 暂无判定。归并工作台（F9）里对每个候选组的判定都会自动记录在此。")
+    lines.append("")
+
+    lines += ["## 七、操作记录（自动采集）", ""]
     if meta.log:
         lines += ["| 时间 | 动作 | 详情 |", "|---|---|---|"]
         for e in meta.log[-60:]:
@@ -99,7 +118,7 @@ def build_summary(meta: ProjectMeta, report: ValidationReport | None = None,
     lines.append("")
 
     if generated:
-        lines += ["## 七、本次星图产出", "",
+        lines += ["## 八、本次星图产出", "",
                   f"- 入图猫咪：**{generated.get('cats', 0)}** 只",
                   f"- 收录照片：**{generated.get('photos', 0)}** 张",
                   f"- 出没分区：**{len(generated.get('zones', {}))}** 个",

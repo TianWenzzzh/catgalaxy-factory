@@ -1,6 +1,8 @@
 """喵星图工厂 · FastAPI 入口。"""
 from __future__ import annotations
 
+import csv
+import io
 import json
 import shutil
 from datetime import date
@@ -13,13 +15,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import census_parser, image_proc, injector, packager, store, summary_writer
-from .config import IMAGE_EXTS, WORKSPACE, ensure_dirs
-from .csv_loader import decode_bytes, empty_template, normalize_id, parse_roster
+from . import census_parser, image_proc, injector, merge, packager, store, summary_writer
+from .config import IMAGE_EXTS, ROSTER_COLUMNS, WORKSPACE, ensure_dirs
+from .csv_loader import build_column_map, decode_bytes, empty_template, normalize_id, parse_roster
 from .image_proc import generate_default_map
 from .injector import build_photo_chunks, render_starmap
 from .models import (CalibData, CalibPoint, CalibUpdateRequest, CreateProjectRequest,
-                     GenerateRequest, ProjectMeta, ValidationReport)
+                     GenerateRequest, MergeDecision, MergeDecisionRequest, ProjectMeta,
+                     RosterPatch, ValidationReport)
 from .validate import passing_rows, report_markdown, validate
 
 app = FastAPI(title="喵星图工厂 CatGalaxy Factory", version="1.0.0")
@@ -101,6 +104,18 @@ def _calib_positions(pid: str) -> Optional[dict]:
     return {k: v.model_dump() for k, v in data.positions.items()}
 
 
+def _photo_url(pid: str, name: str) -> str:
+    """已入库照片 → 浏览器可访问的 URL；文件不在就返回空串。"""
+    base = (name or "").strip().replace("\\", "/").split("/")[-1]
+    if not base:
+        return ""
+    d = store.project_dir(pid) / "assets" / "photos"
+    for p in (d.iterdir() if d.exists() else []):
+        if p.is_file() and p.name.lower() == base.lower():
+            return f"/bundle/{pid}/assets/photos/{quote(p.name)}"
+    return ""
+
+
 def _photo_blobs(pid: str, names: Optional[set[str]] = None) -> dict[str, bytes]:
     out: dict[str, bytes] = {}
     for p in store.photo_files(pid):
@@ -148,7 +163,8 @@ def generate_bundle(pid: str, form: str = "relative", *,
     md = report_markdown(report)
     (dirs["root"] / "校验报告.md").write_text(md, encoding="utf-8")
     stats = injector.generation_stats(rows)
-    summary_md = summary_writer.build_summary(meta, report, stats)
+    summary_md = summary_writer.build_summary(meta, report, stats,
+                                             merge=store.load_merge(pid))
     (dirs["root"] / "归并决策摘要.md").write_text(summary_md, encoding="utf-8")
 
     if form == "inline":
@@ -458,6 +474,148 @@ def delete_calib(pid: str) -> dict:
     return {"cleared": removed}
 
 
+# ---------- 路由：F9 归并工作台 ----------
+
+@app.get("/api/projects/{pid}/merge")
+def get_merge(pid: str) -> dict:
+    """疑似重复建档的候选组 + 已有判定，供工作台左右并排看图。"""
+    meta = _meta_or_404(pid)
+    report = _load_report(pid) or _run_validation(meta)
+    groups = merge.candidate_groups(report.rows)
+    book = store.load_merge(pid)
+    for g in groups:
+        d = book.decisions.get(g["gid"])
+        g["decision"] = d.model_dump() if d else None
+        for m in g["members"]:
+            m["photo_url"] = _photo_url(pid, m["photo"])
+    verdicts = [book.decisions[g["gid"]].verdict for g in groups if g["gid"] in book.decisions]
+    return {
+        "project_id": pid,
+        "groups": groups,
+        "stats": {
+            "groups": len(groups),
+            "members": sum(len(g["members"]) for g in groups),
+            "decided": len(verdicts),
+            "pending": len(groups) - len(verdicts),
+            "same": verdicts.count("same"),
+            "different": verdicts.count("different"),
+            "unsure": verdicts.count("unsure"),
+            "stale_gids": sorted(set(book.decisions) - {g["gid"] for g in groups}),
+        },
+    }
+
+
+@app.put("/api/projects/{pid}/merge")
+def put_merge(pid: str, req: MergeDecisionRequest) -> dict:
+    """落一条人工判定。理由会进操作日志，最终出现在 F7 归并决策摘要里。"""
+    meta = _meta_or_404(pid)
+    report = _load_report(pid) or _run_validation(meta)
+    groups = {g["gid"]: g for g in merge.candidate_groups(report.rows)}
+    group = groups.get(req.gid)
+    if not group:
+        raise HTTPException(404, f"候选组 {req.gid} 不存在（名册可能已改动，请刷新工作台）")
+
+    errs = merge.check_decision(group, req.verdict, req.keep, req.drop, req.reason)
+    if errs:
+        raise HTTPException(400, "；".join(errs))
+
+    book = store.load_merge(pid)
+    decision = MergeDecision(gid=req.gid, verdict=req.verdict, keep=req.keep,
+                             drop=sorted(set(req.drop)), reason=req.reason.strip(),
+                             members=[m["id"] for m in group["members"]],
+                             kind=group["kind"], updated_at=store.now())
+    book.decisions[req.gid] = decision
+    store.save_merge(pid, book)
+    store.log(meta, "归并判定",
+              f"组={req.gid}（{group['kind']}）判定={merge.VERDICT_LABEL[req.verdict]} "
+              f"保留={req.keep or '—'} 弃用={','.join(decision.drop) or '—'} "
+              f"理由={req.reason.strip()[:60]}")
+    return {"saved": decision.model_dump(), "decided": len(book.decisions),
+            "stats": {"groups": len(groups), "decided": len(book.decisions)}}
+
+
+@app.delete("/api/projects/{pid}/merge/{gid}")
+def delete_merge(pid: str, gid: str) -> dict:
+    meta = _meta_or_404(pid)
+    removed = store.drop_merge(pid, gid)
+    if removed:
+        store.log(meta, "撤销归并判定", f"组={gid}")
+    return {"cleared": removed}
+
+
+# ---------- 路由：F10 名册在线编辑 ----------
+
+@app.get("/api/projects/{pid}/roster")
+def get_roster(pid: str) -> dict:
+    """当前名册的原始行与列映射，前端据此做行内编辑（不用再下载-改-上传）。"""
+    _meta_or_404(pid)
+    p = store.project_dir(pid) / "roster.csv"
+    if not p.exists():
+        raise HTTPException(404, "尚未上传名册 CSV")
+    text, enc = decode_bytes(p.read_bytes())
+    raw = [r for r in csv.reader(io.StringIO(text))]
+    header = raw[0] if raw else []
+    mapping, missing, unknown = build_column_map(header)
+    report = _load_report(pid)
+    return {"encoding": enc, "header": header, "rows": raw[1:],
+            "line_offset": 2, "mapping": mapping,
+            "editable_columns": list(ROSTER_COLUMNS),
+            "missing_columns": missing, "unknown_columns": unknown,
+            "report": report.model_dump() if report else None}
+
+
+@app.patch("/api/projects/{pid}/roster")
+def patch_roster(pid: str, req: RosterPatch) -> dict:
+    """按「物理行号 + 标准列名」改单元格，回写 CSV 并自动重跑校验。"""
+    meta = _meta_or_404(pid)
+    p = store.project_dir(pid) / "roster.csv"
+    if not p.exists():
+        raise HTTPException(404, "尚未上传名册 CSV")
+    if not req.edits:
+        raise HTTPException(400, "没有要应用的改动")
+
+    text, _enc = decode_bytes(p.read_bytes())
+    raw = [r for r in csv.reader(io.StringIO(text))]
+    if not raw:
+        raise HTTPException(400, "名册为空，无从修改")
+    mapping, _missing, _unknown = build_column_map(raw[0])
+
+    applied: list[dict] = []
+    rejected: list[dict] = []
+    for e in req.edits:
+        if e.field not in mapping:
+            rejected.append({"line": e.line, "field": e.field,
+                             "why": f"名册没有「{e.field}」这一列"})
+            continue
+        if e.line < 2 or e.line - 1 >= len(raw):
+            rejected.append({"line": e.line, "field": e.field,
+                             "why": f"行号越界（名册只有 {len(raw)} 行，表头是第 1 行）"})
+            continue
+        idx = mapping[e.field]
+        row = raw[e.line - 1]
+        while len(row) <= idx:
+            row.append("")
+        old = row[idx]
+        row[idx] = (e.value or "").strip()
+        applied.append({"line": e.line, "field": e.field, "old": old, "new": row[idx]})
+
+    report = None
+    if applied:
+        buf = io.StringIO()
+        csv.writer(buf, lineterminator="\n").writerows(raw)
+        data = buf.getvalue().encode("utf-8-sig")
+        p.write_bytes(data)
+        (store.project_dir(pid) / "data" / "猫咪名册.csv").write_bytes(data)
+        store.log(meta, "在线编辑名册",
+                  f"改动 {len(applied)} 处，拒绝 {len(rejected)} 处："
+                  + "；".join(f"行{a['line']}·{a['field']}" for a in applied[:6]))
+        if req.revalidate:
+            report = _run_validation(meta)
+
+    return {"applied": applied, "rejected": rejected,
+            "report": report.model_dump() if report else None}
+
+
 # ---------- 路由：F6 / F7 ----------
 
 @app.post("/api/census/parse")
@@ -486,7 +644,7 @@ def summary(pid: str) -> dict:
     report = _load_report(pid)
     rows = passing_rows(report) if report else []
     stats = injector.generation_stats(rows) if rows else None
-    md = summary_writer.build_summary(meta, report, stats)
+    md = summary_writer.build_summary(meta, report, stats, merge=store.load_merge(pid))
     out = store.project_dir(pid) / "归并决策摘要.md"
     out.write_text(md, encoding="utf-8")
     store.log(meta, "生成归并决策摘要", f"{len(md)} 字符")

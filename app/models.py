@@ -105,3 +105,43 @@ class CalibUpdateRequest(BaseModel):
     positions: dict[str, CalibPoint] = Field(default_factory=dict)
     note: str = ""
     merge: bool = True                # False = 全量替换已存标定
+
+
+class MergeDecision(BaseModel):
+    """F9 · 一条归并判定。人工签字，理由会进 F7 摘要。"""
+
+    gid: str
+    verdict: str = "unsure"           # same | different | unsure
+    keep: str = ""                    # 判定同猫时保留的编号
+    drop: list[str] = Field(default_factory=list)
+    reason: str = ""
+    members: list[str] = Field(default_factory=list)
+    kind: str = ""                    # same-photo | coat-area
+    updated_at: str = ""
+
+
+class MergeBook(BaseModel):
+    """一个项目的全部归并判定，按候选组 id 索引。"""
+
+    decisions: dict[str, MergeDecision] = Field(default_factory=dict)
+
+
+class MergeDecisionRequest(BaseModel):
+    gid: str
+    verdict: str = "unsure"
+    keep: str = ""
+    drop: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
+class RosterEdit(BaseModel):
+    """F10 · 一处单元格改动。line 是 CSV 物理行号（表头为第 1 行）。"""
+
+    line: int
+    field: str                        # 12 列标准列名
+    value: str = ""
+
+
+class RosterPatch(BaseModel):
+    edits: list[RosterEdit] = Field(default_factory=list)
+    revalidate: bool = True
