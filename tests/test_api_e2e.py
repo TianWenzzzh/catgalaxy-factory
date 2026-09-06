@@ -56,7 +56,7 @@ def test_template_download(client):
 def test_project_crud(client):
     pid = _create(client, "测试校")
     assert client.get(f"/api/projects/{pid}").status_code == 200
-    assert any(p["id"] == pid for p in client.get("/api/projects").json())
+    assert any(p["id"] == pid for p in client.get("/api/projects").json()["items"])
     assert client.delete(f"/api/projects/{pid}").json()["deleted"] == pid
     assert client.get(f"/api/projects/{pid}").status_code == 404
 

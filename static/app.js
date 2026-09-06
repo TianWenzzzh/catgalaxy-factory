@@ -70,14 +70,26 @@ $("#btnCreate").addEventListener("click", async () => {
   } catch (e) { toast("创建失败：" + e.message, "err"); }
 });
 
+let projSearchTimer = null;
 async function refreshProjects() {
   try {
-    const list = await api("/api/projects");
+    const q = $("#projSearch").value.trim();
+    const j = await api(`/api/projects?limit=100&offset=0&q=${encodeURIComponent(q)}`);
+    const list = j.items || [];
     const sel = $("#projList");
+    const cur = state.pid || "";
     sel.innerHTML = '<option value="">— 打开已有项目 —</option>' +
-      list.map((m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.school)} · ${m.photo_count}照 · ${escapeHtml(m.updated_at)}</option>`).join("");
+      list.map((m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.school)} · ${m.photo_count}照 · ${escapeHtml(m.updated_at)}</option>`).join("") +
+      (j.has_more ? `<option value="" disabled>…另有 ${j.total - list.length} 个未列出，用搜索框缩小范围</option>` : "");
+    if (list.some((m) => m.id === cur)) sel.value = cur;
+    $("#projMore").textContent = q ? `匹配到 ${j.total} 个项目（列出前 ${list.length} 个）`
+                                   : `共 ${j.total} 个项目（列出前 ${list.length} 个）`;
   } catch (e) {}
 }
+$("#projSearch").addEventListener("input", () => {
+  clearTimeout(projSearchTimer);
+  projSearchTimer = setTimeout(refreshProjects, 250);
+});
 $("#projList").addEventListener("change", async (e) => {
   const pid = e.target.value;
   if (!pid) return;

@@ -232,8 +232,22 @@ def create_project(req: CreateProjectRequest) -> dict:
 
 
 @app.get("/api/projects")
-def list_projects() -> list[dict]:
-    return [m.model_dump() for m in store.list_projects()]
+def list_projects(limit: int = 50, offset: int = 0, q: str = "") -> dict:
+    """分页列出项目（按最近更新倒序）。q 按校名 / 项目 id 模糊匹配。"""
+    if not 1 <= limit <= 500:
+        raise HTTPException(400, "limit 必须在 1~500 之间")
+    if offset < 0:
+        raise HTTPException(400, "offset 不能为负")
+
+    metas = store.list_projects()
+    if q.strip():
+        kw = q.strip().lower()
+        metas = [m for m in metas if kw in m.school.lower() or kw in m.id.lower()]
+    total = len(metas)
+    page = metas[offset:offset + limit]
+    return {"items": [m.model_dump() for m in page],
+            "total": total, "limit": limit, "offset": offset,
+            "has_more": offset + len(page) < total}
 
 
 @app.get("/api/projects/{pid}")
