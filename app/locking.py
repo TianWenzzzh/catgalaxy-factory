@@ -24,17 +24,23 @@ from fastapi import HTTPException
 
 from . import config
 
-_LOCKS: dict[str, threading.RLock] = {}
+_LOCKS: dict[str, threading.Semaphore] = {}
 _REGISTRY = threading.Lock()
 
 
-def project_lock(pid: str) -> threading.RLock:
+def project_lock(pid: str) -> threading.Semaphore:
     """取（必要时建）某个项目的锁。
 
-    用 RLock 是为了可重入：路由里可能调到另一个也要锁的辅助函数，
-    同线程重复 acquire 不该把自己锁死。实测确认过 FastAPI 的「带 yield 的
-    同步依赖」、同步路由、依赖退出码三者跑在同一个线程，所以 RLock 的
-    「只能由持有者释放」这条约束不会被踩到。
+    用 ``Semaphore(1)`` 而不是 ``RLock``，是踩过坑的：FastAPI 把「带 yield 的
+    同步依赖」的 __enter__ 和 __exit__ 分两次丢进线程池，并发一上来这两次就
+    会落在**不同**的 AnyIO worker 线程上（线程名一样，身份不一样）。RLock 只
+    认持有者，于是退出时抛 RuntimeError: cannot release un-acquired lock——
+    更糟的是许可没还回去，这个项目从此每个写操作都 409，直到重启进程。
+    信号量没有「持有者」概念，任何线程都能 release。
+
+    代价是不可重入：guard 不能套 guard，否则第二次 acquire 会一直等到超时。
+    当前只有路由挂 guard、辅助函数不挂，不存在嵌套；将来要在辅助函数里加锁，
+    得先想清楚这一点。
 
     注册表只增不减：删项目时不摘锁。摘了的话，正持有锁的线程还没走完，
     新请求就会拿到一把全新的锁并立刻进去，等于同一个项目两把锁——
@@ -43,7 +49,7 @@ def project_lock(pid: str) -> threading.RLock:
     with _REGISTRY:
         lock = _LOCKS.get(pid)
         if lock is None:
-            lock = _LOCKS[pid] = threading.RLock()
+            lock = _LOCKS[pid] = threading.Semaphore(1)
         return lock
 
 
@@ -54,7 +60,11 @@ def lock_count() -> int:
 
 
 def held_by_others(pid: str) -> bool:
-    """项目锁当前是否被占着。只用于诊断，别拿它做判断——返回后状态就可能变了。"""
+    """项目锁当前是否被占着。只用于诊断，别拿它做判断——返回后状态就可能变了。
+
+    名字里的「others」已经名不副实：信号量不记持有者，所以自己拿着锁时它也
+    回 True。想问的其实是「现在忙不忙」。
+    """
     lock = project_lock(pid)
     if lock.acquire(blocking=False):
         lock.release()

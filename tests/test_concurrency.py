@@ -115,14 +115,30 @@ def test_different_pids_get_different_locks():
     assert locking.project_lock("p1") is not locking.project_lock("p2")
 
 
-def test_lock_is_reentrant_so_nested_helpers_cannot_self_deadlock():
-    lock = locking.project_lock("reentrant-demo")
-    assert lock.acquire()
-    try:
-        assert lock.acquire(timeout=0.01), "同一线程重复 acquire 不该把自己锁死"
-        lock.release()
-    finally:
-        lock.release()
+def test_lock_can_be_released_by_a_thread_that_never_acquired_it():
+    """FastAPI 把同步生成器依赖的 __enter__ 和 __exit__ 分两次丢进线程池，
+    并发时这两次落在不同的 AnyIO worker 线程上。锁必须允许「谁都能还」，
+    否则退出时抛 RuntimeError，而且许可没还回去——项目从此每个写操作都 409。
+    RLock 就是在这里翻的车，换成了 Semaphore(1)。
+    """
+    lock = locking.project_lock("cross-thread-release")
+    assert lock.acquire(timeout=1)
+    outcome: list[object] = []
+
+    def release_elsewhere():
+        try:
+            lock.release()
+            outcome.append("ok")
+        except RuntimeError as e:          # pragma: no cover - 回归时才会走到
+            outcome.append(e)
+
+    t = threading.Thread(target=release_elsewhere)
+    t.start()
+    t.join(5)
+    assert outcome == ["ok"], f"别的线程还不了锁：{outcome}"
+    # 许可确实回来了，不是「抛错但其实没释放」
+    assert lock.acquire(timeout=1), "release 之后应当能再拿到锁"
+    lock.release()
 
 
 def test_lock_count_grows_with_distinct_pids():
@@ -157,8 +173,8 @@ def test_held_by_others_reports_a_lock_taken_by_another_thread():
 def test_guard_timeout_is_read_at_call_time_so_tests_can_shrink_it(monkeypatch):
     """超时值必须在调用时才从 config 读；写成默认参数的话这里就调不小了。
 
-    锁得由**另一个**线程持有——RLock 对同线程可重入，自己拿着锁再进 guard
-    会立刻通过，测不到超时分支。
+    锁由**另一个**线程持有，模拟「项目真的在忙」——guard 自己那条路径的
+    拿/还分别落在哪个线程都不影响这个前提。
     """
     monkeypatch.setattr(config, "PROJECT_LOCK_TIMEOUT", 0.05)
     p = "timeout-read-at-call-time"
@@ -191,9 +207,11 @@ def test_guard_releases_the_lock_when_the_handler_succeeds():
     p = "guard-release-ok"
     gen = locking.project_guard(p)
     next(gen)
-    assert locking.held_by_others(p) is False   # 当前线程持有，对「别人」而言不算占用
+    # 信号量没有「持有者」概念：guard 开着的时候，对任何人都是占用中
+    assert locking.held_by_others(p) is True
     with pytest.raises(StopIteration):
         next(gen)
+    assert locking.held_by_others(p) is False
     assert locking.project_lock(p).acquire(timeout=0.01)
     locking.project_lock(p).release()
 
@@ -538,6 +556,36 @@ def test_another_project_is_not_blocked(client, pid, monkeypatch):
         assert r.status_code == 200
     finally:
         locking.project_lock(pid).release()
+
+
+def test_concurrent_guarded_writes_do_not_wedge_the_project(client, pid, monkeypatch):
+    """并发写之后项目必须还能写——这是用户能感觉到的那条底线。
+
+    背景：用 RLock 时，FastAPI 把同步生成器依赖的 __enter__ / __exit__ 分两次
+    丢进线程池，这两次可能落在不同的 AnyIO worker 线程上，退出时抛
+    RuntimeError: cannot release un-acquired lock，**许可也没还回去**。从此
+    这个项目每个写操作都 409「项目正忙」，直到重启进程——用户看到的是
+    「我什么都没干，它就一直说忙」。
+
+    说实话：这条测试用 TestClient 并发时**没能**复现那个 bug（线程池正好复用
+    了同一个 worker，RLock 侥幸过关）。真正的复现现场是
+    test_progress.py::test_progress_is_answered_while_photos_are_being_ingested
+    ——上传和轮询同时跑才把线程池挤开。这条留下来守的是结果而不是成因：
+    不管以后锁怎么换，并发写完项目必须还能写。
+
+    超时留 30 秒：够 12 个请求老老实实排队写完，又不至于让回归时整个测试
+    套件干等到天荒地老。
+    """
+    monkeypatch.setattr(config, "PROJECT_LOCK_TIMEOUT", 30.0)
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        results = list(ex.map(lambda t: _put_calib(client, pid, t[0], t[1]),
+                             [(f"CAT-{i:03d}", i) for i in range(1, 13)]))
+    codes = [r.status_code for r in results]
+    assert codes == [200] * 12, f"并发写里有请求没成功：{codes}"
+    assert locking.held_by_others(pid) is False, \
+        "许可没还回去——这个项目从此每个写操作都会 409"
+    assert _put_calib(client, pid, "CAT-001", 99).status_code == 200, \
+        "并发写之后项目仍然被锁住"
 
 
 def test_read_routes_do_not_wait_for_the_write_lock(client, pid, monkeypatch):
