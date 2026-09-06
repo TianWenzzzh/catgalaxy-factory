@@ -23,6 +23,21 @@
   </div>
 </header>
 
+<!-- 长任务进度条。上传压缩、生成打包都是几十秒量级，而这几十秒里服务端在干活、
+     浏览器什么也看不见；从前只弹一个 Toast，用户以为卡死了就去刷新，
+     而刷新正好把上传打断。所以进度必须是「服务端写、前端轮询」。 -->
+<div id="prog" class="prog" hidden>
+  <div class="progTop">
+    <span class="progPhase" id="progPhase">① 上传</span>
+    <b id="progTask"></b>
+    <span class="progNote" id="progNote"></span>
+    <span class="progPct" id="progPct"></span>
+    <button class="progX" id="progClose" type="button"
+            title="只是收起进度条，后台任务照常跑完">收起 ×</button>
+  </div>
+  <div class="progTrack"><i id="progFill"></i></div>
+</div>
+
 <main>
   <!-- 步骤条 -->
   <ol class="steps" id="steps">

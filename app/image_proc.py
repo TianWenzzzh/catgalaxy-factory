@@ -113,7 +113,8 @@ class ZipBudget:
     """
 
     def __init__(self, max_files: int | None = None, max_inflated: int | None = None,
-                 max_entries: int | None = None, max_depth: int | None = None):
+                 max_entries: int | None = None, max_depth: int | None = None,
+                 on_item=None, on_total=None):
         # 上限在这里才解析到模块常量，而不是写成默认参数值——默认值在函数定义
         # 时就绑定了，测试没法把上限调小来触发限额分支。
         self.max_files = MAX_PHOTOS_PER_UPLOAD if max_files is None else max_files
@@ -128,6 +129,24 @@ class ZipBudget:
         self.corrupt: list[str] = []      # 扩展名是图片但解不开的
         self.too_deep: list[str] = []     # 超过递归层数被放弃的嵌套 zip
         self.bad_zips: list[str] = []     # 打不开的 zip
+        # 进度回调（见 app/progress.py）。zip 里有 76 张照片时，压缩要几十秒，
+        # 而这段全在服务端——浏览器只知道字节传完了，不知道压到第几张。
+        self.on_item = on_item            # 每存好一张 → on_item(文件名)
+        self.on_total = on_total          # 打开一个 zip → on_total(条目数)
+
+    @staticmethod
+    def _notify(cb, *args) -> None:
+        """调进度回调，但绝不让它把真正的上传搞崩。
+
+        进度是「参考信息」：写 progress.json 撞上磁盘满或权限问题，该失败的
+        是进度条，不是用户那 76 张照片的入库。
+        """
+        if cb is None:
+            return
+        try:
+            cb(*args)
+        except Exception:
+            pass
 
     @property
     def stopped(self) -> bool:
@@ -212,7 +231,12 @@ def extract_photo_zip(data: bytes, dest_dir: Path, budget: ZipBudget | None = No
         return results
 
     with zf:
-        for info in zf.infolist():
+        infos = zf.infolist()
+        # 打开 zip 才知道里面有多少张——上传时前端只数得出「1 个文件」。
+        # 报的是条目数而非图片数（含目录项与非图片），所以只是个偏大的估计，
+        # 进度条封顶在 99% 直到请求真的回来。
+        ZipBudget._notify(budget.on_total, len(infos))
+        for info in infos:
             if budget.stopped:
                 break
             if info.is_dir():
@@ -259,6 +283,8 @@ def extract_photo_zip(data: bytes, dest_dir: Path, budget: ZipBudget | None = No
             except Exception:
                 budget.release_file()
                 budget.corrupt.append(name)
+            else:
+                ZipBudget._notify(budget.on_item, Path(name).name)
     return results
 
 

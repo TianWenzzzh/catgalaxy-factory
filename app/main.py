@@ -14,9 +14,10 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
-from . import (census_parser, image_proc, injector, locking, merge, packager, store,
-               summary_writer)
+from . import (census_parser, image_proc, injector, locking, merge, packager,
+               progress, store, summary_writer)
 from .config import (IMAGE_EXTS, MAX_PHOTOS_PER_PROJECT, MAX_PHOTOS_PER_UPLOAD,
                      MAX_UPLOAD_BYTES, ROSTER_COLUMNS, WORKSPACE, atomic_write_bytes,
                      atomic_write_text, ensure_dirs, retry_read_bytes, retry_read_text)
@@ -138,13 +139,28 @@ def _bundle_dir(pid: str, form: str) -> Path:
     return store.project_dir(pid) / "out" / form
 
 
+# generate_bundle 里 stage() 的调用次数。路由用它当进度条的分母，
+# 所以对不上就会「条子走到 83% 就停了」。tests/test_progress.py 会盯住这个数。
+GENERATE_STAGES = 6
+
+
 def generate_bundle(pid: str, form: str = "relative", *,
                     exclude_low_confidence: bool = False,
-                    school: Optional[str] = None) -> dict:
-    """F3+F4+F5 的核心编排：渲染 HTML → 落盘 bundle → 打 zip。"""
+                    school: Optional[str] = None,
+                    rep: Optional[progress.Reporter] = None) -> dict:
+    """F3+F4+F5 的核心编排：渲染 HTML → 落盘 bundle → 打 zip。
+
+    ``rep`` 可选：预览路由的「产物不在就顺手生成一次」也调这个函数，那条路径
+    没人轮询进度，传 None 即可。
+    """
+    def stage(note: str) -> None:
+        if rep is not None:
+            rep.stage(note)
+
     if form not in ("relative", "inline"):
         raise HTTPException(400, "form 只能是 relative 或 inline")
 
+    stage("读校验报告")
     meta = _meta_or_404(pid)
     if school:
         meta.school = school
@@ -157,6 +173,7 @@ def generate_bundle(pid: str, form: str = "relative", *,
         raise HTTPException(409, "没有可入图的行（可能全部被排除）")
 
     dirs = ensure_dirs(pid)
+    stage("准备底图")
     _ensure_map(pid)
     map_bytes = retry_read_bytes(store.map_path(pid))
     map_size = _map_size(pid)
@@ -167,7 +184,9 @@ def generate_bundle(pid: str, form: str = "relative", *,
 
     referenced = {r.photo_file.strip().replace("\\", "/").split("/")[-1]
                   for r in rows if r.photo_file.strip()}
+    stage(f"读 {len(referenced)} 张照片")
     photos = _photo_blobs(pid, referenced)
+    stage("写名册与两份报告")
     roster_csv = retry_read_bytes(
         store.project_dir(pid) / "roster.csv").decode("utf-8", errors="replace")
     md = report_markdown(report)
@@ -177,6 +196,7 @@ def generate_bundle(pid: str, form: str = "relative", *,
                                              merge=store.load_merge(pid))
     atomic_write_text(dirs["root"] / "归并决策摘要.md", summary_md)
 
+    stage("渲染星图 HTML 并落盘产物")
     if form == "inline":
         payload = dict(photos)
         payload["map.jpg"] = map_bytes
@@ -198,6 +218,7 @@ def generate_bundle(pid: str, form: str = "relative", *,
                                                  roster_csv=roster_csv, report_md=md,
                                                  summary_md=summary_md)
 
+    stage("打包 zip")
     zip_name = packager.zip_basename(meta.school)
     zip_path = packager.make_zip(dest, dirs["dist"] / f"{zip_name}.zip")
 
@@ -303,6 +324,28 @@ async def upload_roster(pid: str, file: UploadFile = File(...)) -> dict:
 
 @app.post("/api/projects/{pid}/photos", dependencies=[_GUARD])
 async def upload_photos(pid: str, files: list[UploadFile] = File(...)) -> dict:
+    """收照片。干活的是 _ingest_photos，这一层只负责把进度记下来。
+
+    先 _meta_or_404 再进 Reporter：Reporter 一进去就写 progress.json，而
+    atomic_write_text 会 mkdir 父目录——顺序反了的话，随便探一个不存在的 pid
+    就能在 workspace/ 里留下一个空目录。
+
+    with 是必要的：中途 413 回滚或 Pillow 抛错时 __exit__ 会把进度标成 failed。
+    少了这层，progress.json 会永远停在 running，下一个打开页面的人会看到一条
+    走不完的进度条。
+
+    另外：_ingest_photos 里的重活必须 await run_in_threadpool，别图省事改成
+    直接调用。这条路由是 async 的，同步的解压/压缩会把事件循环整个占住，
+    同一时间 /progress 一个请求都答不上来（实测 60 张的 zip 哑了 6.6 秒），
+    进度条就白做了。
+    """
+    _meta_or_404(pid)
+    with progress.Reporter(pid, "上传并压缩照片", total=len(files)) as rep:
+        return await _ingest_photos(pid, files, rep)
+
+
+async def _ingest_photos(pid: str, files: list[UploadFile],
+                         rep: progress.Reporter) -> dict:
     meta = _meta_or_404(pid)
     dirs = ensure_dirs(pid)
     saved: list[dict] = []
@@ -318,7 +361,8 @@ async def upload_photos(pid: str, files: list[UploadFile] = File(...)) -> dict:
         raise HTTPException(413, f"项目已有 {existing} 张照片，达到累计上限 "
                                  f"{MAX_PHOTOS_PER_PROJECT} 张；请新建项目或先清理旧照片")
 
-    budget = image_proc.ZipBudget(max_files=min(MAX_PHOTOS_PER_UPLOAD, room))
+    budget = image_proc.ZipBudget(max_files=min(MAX_PHOTOS_PER_UPLOAD, room),
+                                  on_item=rep.as_callback(), on_total=rep.grow_total)
 
     def rollback_and_413(why: str):
         """超限就把本次写入的照片全删掉——不留半截入库的项目。"""
@@ -348,8 +392,13 @@ async def upload_photos(pid: str, files: list[UploadFile] = File(...)) -> dict:
                              f"超过单文件上限 {MAX_UPLOAD_BYTES // 1024 // 1024}MB")
 
         if image_proc.is_zip(data):
-            got = image_proc.extract_photo_zip(data, dirs["photos"], budget=budget,
-                                               label=name or "zip")
+            rep.drop_total()      # zip 自己不是一个照片名额，展开后才知道有多少张
+            # 解压 + 逐张压缩 + 落盘全在工作线程里跑。留在事件循环里的话，
+            # 这几秒到几十秒内 /progress 一个请求都答不上来——进度条恰恰
+            # 在它唯一有意义的那段时间里是哑的（实测 60 张的包哑了 6.6 秒）。
+            got = await run_in_threadpool(
+                image_proc.extract_photo_zip, data, dirs["photos"],
+                budget=budget, label=name or "zip")
             for path, info in got:
                 written.append(path)
                 saved.append(info)
@@ -363,7 +412,8 @@ async def upload_photos(pid: str, files: list[UploadFile] = File(...)) -> dict:
         if not budget.charge_file():
             break
         try:
-            path, info = image_proc.process_and_save(data, dirs["photos"], name)
+            path, info = await run_in_threadpool(
+                image_proc.process_and_save, data, dirs["photos"], name)
         except Exception:
             skipped.append(f"{name}（不是有效的图片文件，已跳过）")
             budget.release_file()
@@ -372,6 +422,7 @@ async def upload_photos(pid: str, files: list[UploadFile] = File(...)) -> dict:
         saved.append(info)
         src_bytes += info["src_bytes"]
         compressed_bytes += info["out_bytes"]
+        rep.bump(name)
 
     if budget.stopped:
         rollback_and_413(budget.stop_reason)
@@ -393,7 +444,10 @@ async def upload_photos(pid: str, files: list[UploadFile] = File(...)) -> dict:
 
     report = None
     if meta.has_roster:
-        report = _run_validation(meta)
+        rep.stage("重跑校验")
+        report = await run_in_threadpool(_run_validation, meta)
+
+    rep.finish(f"{len(saved)} 张已入库" + (f"，跳过 {len(skipped)} 个" if skipped else ""))
 
     return {"saved": len(saved), "skipped": skipped, "photos": sorted(store.photo_names(pid)),
             "src_bytes": src_bytes, "out_bytes": compressed_bytes,
@@ -459,8 +513,26 @@ def report_md(pid: str) -> PlainTextResponse:
 
 @app.post("/api/projects/{pid}/generate", dependencies=[_GUARD])
 def generate(pid: str, req: GenerateRequest) -> dict:
-    return generate_bundle(pid, req.form, exclude_low_confidence=req.exclude_low_confidence,
-                           school=req.school)
+    _meta_or_404(pid)      # 同 upload_photos：别为一个不存在的 pid 建目录
+    with progress.Reporter(pid, "生成星图", total=GENERATE_STAGES) as rep:
+        out = generate_bundle(pid, req.form,
+                              exclude_low_confidence=req.exclude_low_confidence,
+                              school=req.school, rep=rep)
+        rep.finish(f"{out['cats']} 颗星 · 内嵌 {out['photos_embedded']} 张照片 · "
+                   f"zip {out['zip_bytes'] / 1024 / 1024:.1f}MB")
+        return out
+
+
+@app.get("/api/projects/{pid}/progress")
+def get_progress(pid: str) -> dict:
+    """轮询长任务进度（上传压缩 / 生成打包）。
+
+    故意不挂项目锁：progress.json 是原子替换写的，读到的一定是完整记录；
+    更要紧的是，挂了锁它就会堵在自己要汇报的那个操作后面——上传正拿着锁，
+    进度请求排在锁外面，前端于是什么也看不到，进度条彻底失去意义。
+    """
+    _meta_or_404(pid)
+    return progress.snapshot_for_client(pid)
 
 
 @app.get("/api/projects/{pid}/preview")

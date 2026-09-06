@@ -206,3 +206,36 @@ code.cd{font-family:ui-monospace,Consolas,monospace;font-size:10px;color:#93a6d6
 ::-webkit-scrollbar-thumb{background:rgba(140,170,255,.2);border-radius:9px}
 ::-webkit-scrollbar-thumb:hover{background:rgba(255,215,106,.34)}
 ::-webkit-scrollbar-track{background:transparent}
+
+/* 长任务进度条 */
+.prog{position:sticky;top:0;z-index:60;padding:8px 22px 10px;
+  background:linear-gradient(180deg,rgba(6,10,24,.97),rgba(6,10,24,.86));
+  border-bottom:1px solid var(--line);backdrop-filter:blur(6px)}
+.progTop{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12px}
+.progTop b{color:var(--gold-soft);font-size:12.5px}
+.progPhase{flex:0 0 auto;font-size:10.5px;font-weight:600;letter-spacing:.04em;
+  color:#1a1408;background:var(--gold);padding:2px 8px;border-radius:999px}
+.progPhase.s2{background:var(--teal);color:#06201c}
+.progNote{color:var(--dim);font-size:11.5px;min-width:0;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.progPct{margin-left:auto;flex:0 0 auto;color:var(--gold);font-size:11.5px;
+  font-family:ui-monospace,Consolas,monospace}
+.progX{flex:0 0 auto;background:none;border:1px solid var(--line);color:var(--dim);
+  font-size:10.5px;padding:2px 8px;border-radius:999px;cursor:pointer;transition:.16s}
+.progX:hover{border-color:var(--gold);color:var(--gold-soft)}
+.progTrack{margin-top:7px;height:5px;border-radius:99px;overflow:hidden;
+  background:rgba(140,170,255,.13)}
+.progTrack i{display:block;height:100%;width:0;border-radius:99px;
+  background:linear-gradient(90deg,var(--gold),var(--gold-soft));
+  transition:width .28s cubic-bezier(.2,.8,.3,1)}
+/* 不确定态：总量还不知道（zip 打开之前数不出里面有几张）。
+   画一条流动的条纹，不画百分比——编一个假数字比不给数字更骗人。 */
+.prog.indet .progTrack i{width:34%;
+  background:linear-gradient(90deg,transparent,rgba(255,215,106,.9),transparent);
+  animation:progSlide 1.15s linear infinite}
+@keyframes progSlide{from{transform:translateX(-120%)}to{transform:translateX(330%)}}
+.prog.done .progTrack i{background:linear-gradient(90deg,var(--green),#a8f5d2)}
+.prog.done .progPhase{background:var(--green);color:#052018}
+.prog.err .progTrack i{background:linear-gradient(90deg,var(--red),#ffc2cd)}
+.prog.err .progPhase{background:var(--red);color:#2a0a12}
+.prog.stale .progNote{color:var(--gold)}

@@ -38,6 +38,179 @@ async function api(path, opts = {}) {
   return ct.includes("json") ? r.json() : r.text();
 }
 
+/* ---------- 长任务进度 ----------
+ * 分两段，因为「上传」和「服务端处理」是两个不同的量：
+ *   ① 浏览器把字节推上去 —— 只有 XHR 有 upload.onprogress，fetch 没有，
+ *      所以照片上传走 uploadWithProgress 而不是 api()。
+ *   ② 服务端解压 + 压缩 + 落盘 —— 几十秒，浏览器完全看不见，只能轮询。
+ * 第二段一开始报数就以它为准：它发生在第一段之后，把条子往回拨没有意义。
+ */
+const PROG_POLL_MS = 300;
+let progTimer = null;
+let progDismissTimer = null;
+let progRunId = null;        // 锁定本轮任务，见 progAccept
+let progPhase2 = false;
+
+function uploadWithProgress(url, fd, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    if (onProgress) {
+      xhr.upload.addEventListener("progress", (e) => {
+        if (e.lengthComputable) onProgress(e.loaded, e.total);
+      });
+    }
+    xhr.addEventListener("load", () => {
+      const text = xhr.responseText;
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { resolve(JSON.parse(text)); } catch (e) { resolve(text); }
+        return;
+      }
+      // 错误解析跟 api() 保持一致，调用方才能拿到后端那句人话（比如 413 的限额说明）
+      let detail = `${xhr.status} ${xhr.statusText}`;
+      try { const j = JSON.parse(text); if (j.detail) detail = j.detail; } catch (e) {}
+      reject(new Error(detail));
+    });
+    xhr.addEventListener("error", () => reject(new Error("网络错误：连接中断，文件没传完")));
+    xhr.addEventListener("abort", () => reject(new Error("上传已取消")));
+    xhr.send(fd);
+  });
+}
+
+const mb = (n) => (n / 1048576).toFixed(n < 10485760 ? 2 : 1);
+
+function progReset() {
+  clearTimeout(progTimer); clearTimeout(progDismissTimer);
+  progTimer = null; progDismissTimer = null; progRunId = null; progPhase2 = false;
+}
+
+function progHide() {
+  clearTimeout(progDismissTimer);
+  progDismissTimer = null;
+  $("#prog").hidden = true;
+}
+
+/**
+ * @param hasUpload 有没有「浏览器往上传字节」这一段。生成星图没有，直接进第二段。
+ */
+function progBegin(pid, task, hasUpload) {
+  progReset();
+  const p = $("#prog");
+  p.hidden = false;
+  p.className = "prog indet";
+  $("#progTask").textContent = task;
+  $("#progPct").textContent = "";
+  $("#progFill").style.width = "";
+  if (hasUpload) {
+    $("#progPhase").textContent = "① 上传";
+    $("#progPhase").className = "progPhase";
+    $("#progNote").textContent = "等待发送…";
+  } else {
+    progEnterPhase2(task);
+  }
+  progPoll(pid);
+}
+
+function progEnterPhase2(task) {
+  progPhase2 = true;
+  $("#progPhase").textContent = "② 服务端处理";
+  $("#progPhase").className = "progPhase s2";
+  if (task) $("#progTask").textContent = task;
+  /* 交接的瞬间先落到「不确定态」，别把上传的 100% 挂在「② 服务端处理」的
+     标签下面——那是个假状态：服务端此刻连总量都还不知道（zip 没打开）。
+     注意这不消除数字上的回拨：两段量的是完全不同的东西，条子必然从 100%
+     跳回 3%，靠的是同时变脸的阶段标签和文件名说明，不是靠进度条本身。
+     实测这个不确定态活不过一个轮询周期，第一条记录就带着真实分数来了。 */
+  $("#prog").classList.add("indet");
+  $("#progFill").style.width = "";
+  $("#progPct").textContent = "";
+  $("#progNote").textContent = "服务端开始处理…";
+}
+
+function progUpload(loaded, total) {
+  if (progPhase2) return;
+  $("#prog").classList.remove("indet");
+  $("#progFill").style.width = `${total ? (loaded / total * 100).toFixed(1) : 0}%`;
+  $("#progNote").textContent = "正在上传…";
+  $("#progPct").textContent = `${mb(loaded)} / ${mb(total)} MB`;
+}
+
+function progAccept(rec) {
+  /* 轮询是在自己那个请求还没回来时就开始的，磁盘上很可能是上一轮留下的记录
+     ——服务端崩过的话它会永远停在 running。所以第一次只认「正在跑的、
+     且是刚起来的」那一条，然后用 run_id 把本轮锁死。 */
+  if (!rec || !rec.run_id || rec.state === "idle") return null;
+  if (progRunId === null) {
+    if (rec.state !== "running") return null;
+    if (rec.server_now - rec.started_at > 5) return null;
+    progRunId = rec.run_id;
+  } else if (rec.run_id !== progRunId) {
+    return null;
+  }
+  return rec;
+}
+
+function progRender(r) {
+  if (r.state === "done") { progDone(r.message || "完成"); return; }
+  if (r.state === "failed") { progFail(r.message || "任务失败"); return; }
+  if (!progPhase2) progEnterPhase2(r.task);
+  const p = $("#prog");
+  const quiet = r.server_now - r.updated_at;
+  const stale = quiet > (r.stale_after || 20);
+  p.classList.toggle("stale", stale);
+  if (r.fraction === null || r.fraction === undefined) {
+    p.classList.add("indet");            // 总量未知（zip 还没打开）：不编百分比
+    $("#progFill").style.width = "";
+    $("#progPct").textContent = r.done ? `已处理 ${r.done}` : "";
+  } else {
+    p.classList.remove("indet");
+    $("#progFill").style.width = `${(r.fraction * 100).toFixed(1)}%`;
+    $("#progPct").textContent =
+      `${r.done}${r.total ? "/" + r.total : ""} · ${(r.fraction * 100).toFixed(0)}%`;
+  }
+  $("#progNote").textContent = stale
+    ? `已 ${Math.round(quiet)} 秒没有进展，可能已中断——别刷新，刷新会真的打断它`
+    : (r.note || r.task);
+}
+
+function progPoll(pid) {
+  progTimer = setTimeout(async () => {
+    let rec = null;
+    try { rec = await api(`/api/projects/${pid}/progress`); } catch (e) { /* 轮询失败不算错 */ }
+    const r = progAccept(rec);
+    if (r) progRender(r);
+    if (progTimer) progPoll(pid);        // progReset 把它清空后就自然停下
+  }, PROG_POLL_MS);
+}
+
+function progDone(msg) {
+  progReset();
+  const p = $("#prog");
+  p.hidden = false;
+  p.className = "prog done";
+  $("#progPhase").textContent = "✓ 完成";
+  $("#progNote").textContent = msg;
+  $("#progPct").textContent = "";
+  $("#progFill").style.width = "100%";
+  progDismissTimer = setTimeout(progHide, 2600);
+}
+
+function progFail(msg) {
+  progReset();
+  const p = $("#prog");
+  p.hidden = false;
+  p.className = "prog err";
+  $("#progPhase").textContent = "✕ 失败";
+  $("#progNote").textContent = msg;
+  $("#progPct").textContent = "";
+  progDismissTimer = setTimeout(progHide, 9000);   // 失败原因留久一点，让人看清
+}
+
+$("#progClose").addEventListener("click", () => {
+  progReset(); progHide();
+  toast("进度条已收起，后台任务仍在继续跑", "");
+});
+
 /* ---------- 1 建项目 ---------- */
 $("#btnCreate").addEventListener("click", async () => {
   const school = $("#school").value.trim() || "示例校";
@@ -149,14 +322,20 @@ bindDrop("#dropRoster", "#rosterFile", "#rosterState", async (files) => {
   } catch (e) { $("#rosterState").textContent = "失败"; $("#rosterState").className = "err"; toast("导入失败：" + e.message, "err"); }
 });
 
+let busy = false;      // 同一时刻只放一个长任务：服务端项目锁是串行的，
+                       // 第二个请求会一直等到超时才回 409，不如在前端就拦住
+
 bindDrop("#dropPhotos", "#photoFiles", "#photoState", async (files) => {
   if (!needPid()) return;
+  if (busy) { toast("上一个任务还没结束，等它跑完再传", "err"); return; }
   const fd = new FormData();
   for (const f of files) fd.append("files", f);
   $("#photoState").textContent = `上传 ${files.length} 个…`;
   $("#uploadNote").hidden = true;
+  busy = true;
+  progBegin(state.pid, `上传 ${files.length} 个文件`, true);
   try {
-    const r = await api(`/api/projects/${state.pid}/photos`, { method: "POST", body: fd });
+    const r = await uploadWithProgress(`/api/projects/${state.pid}/photos`, fd, progUpload);
     const kb = (r.out_bytes / 1024).toFixed(0);
     $("#photoState").textContent = `${r.photos.length} 张 · ${kb}KB`;
     $("#photoState").className = "ok";
@@ -174,6 +353,7 @@ bindDrop("#dropPhotos", "#photoFiles", "#photoState", async (files) => {
       n.textContent = notes.join(" ｜ ");
       n.hidden = false;
     }
+    progDone(`${r.saved} 张已压缩入库 · 长边≤${r.max_side || 1200}px · 共 ${kb}KB`);
     toast(`照片已压缩入库：${r.saved} 张（长边≤${r.max_side || 1200}px，共 ${kb}KB）`,
           notes.length ? "" : "ok");
     if (r.report) { state.report = r.report; renderReport(r.report); }
@@ -184,7 +364,10 @@ bindDrop("#dropPhotos", "#photoFiles", "#photoState", async (files) => {
     n.textContent = `${e.message}。本次上传已整体回滚，项目里不会留下半截照片——`
                   + `把 zip 拆小一点、或分几次传再试。`;
     n.hidden = false;
+    progFail(e.message);
     toast("上传被拒：" + e.message, "err");
+  } finally {
+    busy = false;
   }
 });
 
@@ -273,9 +456,12 @@ function currentForm() { return $('input[name=form]:checked').value; }
 
 $("#btnGenerate").addEventListener("click", async () => {
   if (!needPid()) return;
+  if (busy) { toast("上一个任务还没结束，等它跑完再生成", "err"); return; }
   const form = currentForm();
+  busy = true;
   $("#btnGenerate").disabled = true;
   $("#btnGenerate").textContent = "生成中…";
+  progBegin(state.pid, "生成星图", false);
   try {
     const r = await api(`/api/projects/${state.pid}/generate`, {
       method: "POST",
@@ -303,11 +489,14 @@ $("#btnGenerate").addEventListener("click", async () => {
     loadPreview(r.preview_url);
     setStep(5, [1, 2, 3, 4]);
     await refreshCalib();
+    progDone(`${r.cats} 颗星 · 内嵌 ${r.photos_embedded} 张照片 · zip ${(r.zip_bytes / 1048576).toFixed(2)}MB`);
     toast(`星图已生成：${r.cats} 颗星`, "ok");
   } catch (e) {
+    progFail(e.message);
     toast("生成失败：" + e.message, "err");
     setStep(3, [1, 2]);
   } finally {
+    busy = false;
     $("#btnGenerate").disabled = false;
     $("#btnGenerate").textContent = "生成星图";
   }
