@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>__TITLE__</title>
+<style>
+  :root{
+    --bg:#070c1c; --ink:#e8efff; --dim:#7e92c4;
+    --gold:#ffd76a; --gold-soft:#ffe9a8; --teal:#7de8d8; --mag:#c48cff;
+    --line:rgba(140,170,255,.16); --panel:rgba(10,18,40,.86);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
+    font-family:"PingFang SC","Microsoft YaHei","Hiragino Sans GB",system-ui,sans-serif;
+    overflow:hidden;-webkit-font-smoothing:antialiased}
+  #sky{position:fixed;inset:0;width:100%;height:100%;display:block;cursor:grab;touch-action:none}
+  #sky.drag{cursor:grabbing}
+
+  /* 顶栏 */
+  header{position:fixed;top:0;left:0;right:0;z-index:20;padding:14px 18px 10px;
+    background:linear-gradient(180deg,rgba(5,9,22,.94),rgba(5,9,22,.55) 62%,transparent);
+    pointer-events:none}
+  header>*{pointer-events:auto}
+  h1{margin:0;font-size:19px;letter-spacing:.14em;font-weight:700;
+    color:var(--gold-soft);text-shadow:0 0 18px rgba(255,215,106,.34)}
+  .sub{margin:4px 0 0;font-size:12px;color:var(--dim);letter-spacing:.06em}
+  .stats{margin:3px 0 0;font-size:11.5px;color:#9fb2e0;letter-spacing:.04em}
+
+  /* 工具条 */
+  #bar{position:fixed;left:18px;bottom:18px;z-index:20;display:flex;gap:8px;flex-wrap:wrap;max-width:calc(100% - 36px)}
+  .chip{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;border-radius:999px;
+    font-size:12px;cursor:pointer;border:1px solid var(--line);background:var(--panel);
+    color:#cdd9f5;transition:.18s;user-select:none;backdrop-filter:blur(8px)}
+  .chip:hover{border-color:rgba(255,233,168,.6);color:var(--gold-soft);transform:translateY(-1px)}
+  .chip.on{border-color:var(--gold);color:var(--gold-soft);box-shadow:0 0 14px rgba(255,215,106,.24)}
+  .chip .n{font-size:9.5px;font-weight:700;color:#7e92c4;background:rgba(120,150,220,.14);
+    border-radius:999px;padding:1px 5px}
+  .chip.on .n{color:#ffd98f;background:rgba(255,215,106,.2)}
+
+  /* 搜索 */
+  #searchWrap{position:fixed;top:14px;right:18px;z-index:22;display:flex;gap:8px;align-items:center}
+  #search{width:158px;padding:7px 12px;border-radius:999px;font-size:12.5px;color:var(--ink);
+    border:1px solid var(--line);background:rgba(14,24,50,.78);outline:none;transition:.2s}
+  #search:focus{border-color:rgba(255,215,106,.55);width:200px}
+  #search.miss{border-color:rgba(255,126,146,.62)}
+
+  /* 图例 */
+  #legend{position:fixed;right:18px;top:60px;z-index:20;width:186px;padding:11px 12px;
+    border-radius:12px;border:1px solid var(--line);background:var(--panel);
+    backdrop-filter:blur(9px);font-size:11.5px;max-height:calc(100vh - 150px);overflow:auto}
+  #legend h3{margin:0 0 7px;font-size:11px;letter-spacing:.1em;color:var(--gold-soft);font-weight:600}
+  #legend .row{display:flex;align-items:center;gap:7px;padding:3px 4px;border-radius:6px;cursor:pointer;color:#c3d0ee}
+  #legend .row:hover{background:rgba(140,170,255,.09);color:#e8efff}
+  #legend .row.on{background:rgba(255,215,106,.12);color:var(--gold-soft)}
+  #legend .dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
+  #legend .cnt{margin-left:auto;font-size:10px;color:#7e92c4}
+  #legend .sep{height:1px;background:var(--line);margin:8px 0}
+  #legend .foot{color:#6f80ab;font-size:10.5px;line-height:1.6}
+
+  /* 详情卡 */
+  #card{position:fixed;left:50%;bottom:70px;transform:translate(-50%,20px);z-index:30;
+    width:min(400px,calc(100% - 32px));border-radius:14px;border:1px solid rgba(255,215,106,.28);
+    background:linear-gradient(180deg,rgba(12,20,44,.97),rgba(8,14,32,.97));
+    box-shadow:0 18px 54px rgba(0,0,0,.6);opacity:0;pointer-events:none;transition:.26s cubic-bezier(.2,.8,.3,1)}
+  #card.on{opacity:1;pointer-events:auto;transform:translate(-50%,0)}
+  #cardTop{display:flex;gap:12px;padding:13px 14px 10px}
+  #cardPhoto{width:96px;height:96px;border-radius:10px;object-fit:cover;flex:0 0 auto;
+    background:#0d1730;border:1px solid var(--line)}
+  #cardPhoto.ph{display:flex;align-items:center;justify-content:center;font-size:10px;color:#5d6f9c;text-align:center;padding:6px}
+  #cardHead{min-width:0;flex:1}
+  #cardName{font-size:17px;font-weight:700;color:var(--gold-soft);letter-spacing:.04em}
+  #cardId{font-size:10.5px;color:#7e92c4;margin-top:2px;font-family:ui-monospace,Consolas,monospace}
+  #cardRank{display:inline-block;margin-top:6px;padding:2px 8px;border-radius:999px;font-size:10.5px;
+    border:1px solid rgba(125,232,216,.4);color:var(--teal);background:rgba(125,232,216,.09)}
+  #cardBody{padding:0 14px 13px;font-size:12px;line-height:1.75;color:#c8d5f2}
+  #cardBody .kv{display:flex;gap:7px;margin:2px 0}
+  #cardBody .k{color:#7e92c4;flex:0 0 52px}
+  #cardBio{margin-top:8px;padding-top:8px;border-top:1px solid var(--line);color:#dfe8ff;font-size:12px;line-height:1.8}
+  #cardClose{position:absolute;top:8px;right:10px;width:24px;height:24px;border-radius:50%;
+    display:flex;align-items:center;justify-content:center;cursor:pointer;color:#8fa2cf;
+    border:1px solid transparent;font-size:14px;transition:.18s}
+  #cardClose:hover{color:#e9d5ff;border-color:var(--mag);transform:rotate(90deg)}
+  #cardMeta{padding:7px 14px;border-top:1px solid var(--line);font-size:10px;color:#61739f;
+    display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+
+  /* 悬浮提示 */
+  #tip{position:fixed;z-index:25;padding:4px 9px;border-radius:7px;font-size:11.5px;
+    background:rgba(8,14,32,.94);border:1px solid rgba(255,215,106,.3);color:var(--gold-soft);
+    pointer-events:none;opacity:0;transition:opacity .12s;white-space:nowrap}
+  #tip.on{opacity:1}
+
+  /* 分区标签开关时的空态 */
+  #empty{position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:15;
+    text-align:center;color:#7e92c4;font-size:13px;padding:20px;line-height:2}
+  #empty.on{display:flex}
+
+  footer{position:fixed;left:18px;bottom:0;z-index:18;font-size:10px;color:#4f608c;
+    padding-bottom:4px;pointer-events:none;letter-spacing:.03em}
+  @media(max-width:760px){
+    #legend{display:none}
+    h1{font-size:16px}
+    #search{width:118px}
+    #card{bottom:62px}
+  }
+</style>
+</head>
+<body>
+<canvas id="sky"></canvas>
+
+<header>
+  <h1>__TITLE__</h1>
+  <div class="sub">__SUBTITLE__</div>
+  <div class="stats">__STATS__</div>
+</header>
+
+<div id="searchWrap">
+  <input id="search" type="search" placeholder="搜索喵名 / 军衔 / 毛色" autocomplete="off" aria-label="搜索猫咪">
+</div>
+
+<aside id="legend">
+  <h3>星色图例 · 毛色分组</h3>
+  <div id="legendRows"></div>
+  <div class="sep"></div>
+  <h3>星等 · 收录照片数</h3>
+  <div class="foot" id="magFoot"></div>
+  <div class="sep"></div>
+  <div class="foot">数据源：data/猫咪名册.csv<br>星色 = 毛色 ｜ 星等 = 照片数<br>环绕光点 = 收录张数</div>
+</aside>
+
+<div id="bar">
+  <span class="chip on" id="btnZones" role="button" tabindex="0">◈ 分区标签</span>
+  <span class="chip on" id="btnOrbit" role="button" tabindex="0">✧ 光点环绕</span>
+  <span class="chip" id="btnNet" role="button" tabindex="0">⌁ 星链</span>
+  <span class="chip" id="btnReset" role="button" tabindex="0">↺ 复位视角</span>
+  <span class="chip" id="btnAll" role="button" tabindex="0">✦ 全部显示</span>
+</div>
+
+<div id="empty">当前筛选下没有星星<br>点「✦ 全部显示」或清空搜索框</div>
+
+<div id="card">
+  <div id="cardClose" role="button" tabindex="0" aria-label="关闭">✕</div>
+  <div id="cardTop">
+    <img id="cardPhoto" alt="代表照片">
+    <div id="cardHead">
+      <div id="cardName"></div>
+      <div id="cardId"></div>
+      <span id="cardRank"></span>
+    </div>
+  </div>
+  <div id="cardBody"></div>
+  <div id="cardMeta"></div>
+</div>
+
+<div id="tip"></div>
+<footer>__FOOTER__</footer>
+
+<!--__PHOTO_SCRIPTS__-->
+<script>
+/* 把相对路径解析为内嵌 base64（inline 形态由 photo-data-NN.js 提供 __PHOTOS） */
+function PH(p){var k=String(p||"").split("/").pop();return (window.__PHOTOS&&window.__PHOTOS[k])||p;}
+</script>
+<script>
+/* =========================================================
+ * __TITLE__ · 校园猫咪星系
+ * 由「喵星图工厂 CatGalaxy Factory」生成
+ * 数据契约：CATS[]（12 键）+ CALIB{}（归一化坐标）
+ * 星色 = 毛色分组 ｜ 星等 = 收录照片数 ｜ 星位 = 出没区域分区
+ * ========================================================= */
+"use strict";
+const CATS = /*__CATS__*/[];
+const CALIB = /*__CALIB__*/{};
+const MAP_SRC = "__MAP_SRC__";
+const ZONES = /*__ZONES__*/[];
+const SCHOOL = "__SCHOOL__";
+const LS_KEY = "__LS_KEY__";
+
+const canvas = document.getElementById("sky"), ctx = canvas.getContext("2d");
+const DPR = Math.min(window.devicePixelRatio || 1, 2);
+let W = 0, H = 0;
+const MW = 1920, MH = 1239;                       // 底图逻辑尺寸
+const cam = { x: 0, y: 0, z: 1 };
+const mapImg = new Image(); let mapReady = false;
+
+/* ---------- 工具 ---------- */
+const TAU = Math.PI * 2;
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+function hashStr(s){let h=2166136261;for(const c of String(s)){h^=c.codePointAt(0);h=Math.imul(h,16777619);}return h>>>0;}
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);
+  t=t+Math.imul(t^t>>>7,61|t)^t;return ((t^t>>>14)>>>0)/4294967296;};}
+const toScreen = (nx, ny) => ({ x: cam.x + nx * MW * cam.z, y: cam.y + ny * MH * cam.z });
+const toNorm = (sx, sy) => ({ x: (sx - cam.x) / (MW * cam.z), y: (sy - cam.y) / (MH * cam.z) });
+
+/* ---------- 位置：CALIB 优先，缺失时用 id 种子散开 ---------- */
+function basePos(cat){ const r = mulberry32(hashStr(cat.id)); return { x:.10+r()*.80, y:.14+r()*.72 }; }
+const POS = new Map();
+function catPos(c){
+  let p = POS.get(c.id);
+  if(!p){ p = CALIB[c.id] || basePos(c); POS.set(c.id, p); }
+  return p;
+}
+
+/* ---------- 状态 ---------- */
+const state = {
+  showZones: true, orbit: true, net: false,
+  activeGroups: new Set(), query: "", hover: null, selected: null, t: 0,
+};
+function visible(c){
+  if(state.activeGroups.size && !state.activeGroups.has(c.coatGroup)) return false;
+  if(state.query){
+    const q = state.query;
+    const hay = [c.name, c.rank, c.title, c.coat, c.area, c.id, c.features].join(" ").toLowerCase();
+    if(!hay.includes(q)) return false;
+  }
+  return true;
+}
+
+/* ---------- 星辉 sprite 缓存 ---------- */
+const spriteCache = new Map();
+function glowSprite(rgb){
+  const key = "g" + rgb;
+  let s = spriteCache.get(key);
+  if(s) return s;
+  s = document.createElement("canvas"); s.width = s.height = 96;
+  const g = s.getContext("2d"), gr = g.createRadialGradient(48,48,0,48,48,48);
+  gr.addColorStop(0,   `rgba(${rgb},1)`);
+  gr.addColorStop(0.16,`rgba(${rgb},.82)`);
+  gr.addColorStop(0.38,`rgba(${rgb},.24)`);
+  gr.addColorStop(1,   `rgba(${rgb},0)`);
+  g.fillStyle = gr; g.beginPath(); g.arc(48,48,48,0,TAU); g.fill();
+  const core = g.createRadialGradient(48,48,0,48,48,11);
+  core.addColorStop(0,"rgba(255,255,255,.96)");
+  core.addColorStop(1,`rgba(${rgb},0)`);
+  g.fillStyle = core; g.beginPath(); g.arc(48,48,11,0,TAU); g.fill();
+  spriteCache.set(key, s);
+  return s;
+}
+
+/* ---------- 背景星尘 ---------- */
+const dust = [];
+function buildDust(){
+  dust.length = 0;
+  const n = W < 760 ? 420 : 1100;
+  const r = mulberry32(99);
+  for(let i=0;i<n;i++) dust.push({ x:r()*W, y:r()*H, s:r()*1.3+.25, a:r()*.55+.12, w:r()*TAU });
+}
+
+/* ---------- 尺寸 ---------- */
+function resize(){
+  W = innerWidth; H = innerHeight;
+  canvas.width = W * DPR; canvas.height = H * DPR;
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  buildDust(); fitView();
+}
+function fitView(){
+  const z = Math.max(W / MW, H / MH) * 1.02;
+  cam.z = z; cam.x = (W - MW * z) / 2; cam.y = (H - MH * z) / 2;
+}
+addEventListener("resize", resize);
+
+/* ---------- 绘制 ---------- */
+function drawMap(){
+  if(!mapReady) return;
+  const dw = MW * cam.z, dh = MH * cam.z;
+  ctx.save();
+  ctx.globalAlpha = .92;
+  ctx.drawImage(mapImg, cam.x, cam.y, dw, dh);
+  ctx.globalAlpha = 1;
+  // 压暗一层，让星星浮出来
+  ctx.fillStyle = "rgba(4,8,20,.42)";
+  ctx.fillRect(cam.x, cam.y, dw, dh);
+  ctx.restore();
+}
+function drawDust(){
+  for(const d of dust){
+    const a = d.a * (.62 + .38 * Math.sin(state.t * .0011 + d.w));
+    ctx.fillStyle = `rgba(190,210,255,${a.toFixed(3)})`;
+    ctx.fillRect(d.x, d.y, d.s, d.s);
+  }
+}
+function drawNet(list){
+  if(list.length < 2) return;
+  ctx.save();
+  ctx.strokeStyle = "rgba(125,232,216,.14)"; ctx.lineWidth = 1;
+  const pts = list.map(c => { const p = toScreen(...Object.values(catPos(c)).slice(0,2)); return p; });
+  for(let i=0;i<pts.length;i++){
+    let best = -1, bd = 1e9;
+    for(let j=0;j<pts.length;j++){
+      if(i===j) continue;
+      const d = (pts[i].x-pts[j].x)**2 + (pts[i].y-pts[j].y)**2;
+      if(d < bd){ bd = d; best = j; }
+    }
+    if(best >= 0 && bd < (170*cam.z)**2){
+      ctx.beginPath(); ctx.moveTo(pts[i].x, pts[i].y); ctx.lineTo(pts[best].x, pts[best].y); ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+function drawZones(list){
+  const byZone = new Map();
+  for(const c of list){
+    const z = c.zone || "未归类区";
+    if(!byZone.has(z)) byZone.set(z, []);
+    byZone.get(z).push(c);
+  }
+  ctx.save();
+  ctx.font = "600 11.5px 'PingFang SC','Microsoft YaHei',sans-serif";
+  ctx.textAlign = "center";
+  for(const [zname, members] of byZone){
+    let sx=0, sy=0;
+    for(const c of members){ const p = catPos(c); sx += p.x; sy += p.y; }
+    const cx = sx/members.length, cy = sy/members.length;
+    const s = toScreen(cx, cy);
+    // 分区光晕
+    let minX=1e9,maxX=-1e9,minY=1e9,maxY=-1e9;
+    for(const c of members){ const p=toScreen(catPos(c).x,catPos(c).y);
+      minX=Math.min(minX,p.x);maxX=Math.max(maxX,p.x);minY=Math.min(minY,p.y);maxY=Math.max(maxY,p.y); }
+    const pad = 26*cam.z;
+    ctx.strokeStyle = "rgba(140,170,255,.13)"; ctx.lineWidth = 1;
+    ctx.setLineDash([4,5]);
+    ctx.strokeRect(minX-pad, minY-pad, (maxX-minX)+pad*2, (maxY-minY)+pad*2);
+    ctx.setLineDash([]);
+    ctx.fillStyle = "rgba(160,185,240,.5)";
+    ctx.fillText(`${zname} · ${members.length}`, (minX+maxX)/2, minY-pad-7);
+  }
+  ctx.restore();
+}
+function drawStar(c){
+  const p = catPos(c), s = toScreen(p.x, p.y);
+  const b = c.brightness || .6;
+  const r = (2.2 + 3.4 * b) * Math.max(.72, cam.z * .82);
+  const sp = glowSprite(c.starColor || "200,200,220");
+  const size = r * 11;
+  const pulse = 1 + .055 * Math.sin(state.t * .0019 + hashStr(c.id) % 100 / 16);
+  ctx.save();
+  ctx.globalAlpha = clamp(.55 + b * .5, 0, 1);
+  ctx.drawImage(sp, s.x - size/2*pulse, s.y - size/2*pulse, size*pulse, size*pulse);
+  ctx.restore();
+
+  // 环绕光点 = 收录照片数
+  if(state.orbit){
+    const n = Math.min(12, c.photoCount || 1);
+    const orbitR = r * 2.5 + 5;
+    ctx.save();
+    for(let i=0;i<n;i++){
+      const a = state.t * .00042 * (1 + (hashStr(c.id)%7)/14) + i * TAU / n;
+      const ox = s.x + Math.cos(a) * orbitR, oy = s.y + Math.sin(a) * orbitR * .82;
+      ctx.fillStyle = `rgba(${c.starColor || "200,200,220"},.78)`;
+      ctx.beginPath(); ctx.arc(ox, oy, 1.25, 0, TAU); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // 命中/选中环
+  if(state.hover === c || state.selected === c){
+    ctx.save();
+    ctx.strokeStyle = state.selected === c ? "rgba(255,215,106,.95)" : "rgba(255,233,168,.6)";
+    ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.arc(s.x, s.y, r * 3.4 + 6, 0, TAU); ctx.stroke();
+    ctx.fillStyle = "rgba(255,233,168,.94)";
+    ctx.font = "600 12px 'PingFang SC','Microsoft YaHei',sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(c.name, s.x, s.y - r * 3.4 - 12);
+    ctx.restore();
+  }else if(cam.z > .62){
+    ctx.save();
+    ctx.fillStyle = `rgba(214,226,255,${clamp(.34 + b*.3, 0, .8).toFixed(2)})`;
+    ctx.font = "11px 'PingFang SC','Microsoft YaHei',sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(c.name, s.x, s.y + r * 3.1 + 11);
+    ctx.restore();
+  }
+}
+
+function frame(ts){
+  state.t = ts || 0;
+  ctx.clearRect(0, 0, W, H);
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, "#050918"); bg.addColorStop(.55, "#070c1c"); bg.addColorStop(1, "#04070f");
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  drawDust();
+  drawMap();
+  const list = CATS.filter(visible);
+  document.getElementById("empty").classList.toggle("on", list.length === 0);
+  if(state.net) drawNet(list);
+  if(state.showZones) drawZones(list);
+  for(const c of list) drawStar(c);
+  requestAnimationFrame(frame);
+}
+
+/* ---------- 交互 ---------- */
+let dragging = false, moved = false, lx = 0, ly = 0;
+canvas.addEventListener("pointerdown", e => {
+  dragging = true; moved = false; lx = e.clientX; ly = e.clientY;
+  canvas.classList.add("drag"); canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener("pointermove", e => {
+  if(dragging){
+    const dx = e.clientX - lx, dy = e.clientY - ly;
+    if(Math.abs(dx) + Math.abs(dy) > 3) moved = true;
+    cam.x += dx; cam.y += dy; lx = e.clientX; ly = e.clientY;
+    return;
+  }
+  const hit = pick(e.clientX, e.clientY);
+  state.hover = hit;
+  canvas.style.cursor = hit ? "pointer" : "grab";
+  const tip = document.getElementById("tip");
+  if(hit){
+    tip.textContent = `${hit.name} · ${hit.rank || "未定衔"} · ${hit.photoCount || 1}张`;
+    tip.style.left = (e.clientX + 14) + "px";
+    tip.style.top = (e.clientY - 10) + "px";
+    tip.classList.add("on");
+  }else tip.classList.remove("on");
+});
+addEventListener("pointerup", e => {
+  if(dragging && !moved){
+    const hit = pick(e.clientX, e.clientY);
+    if(hit) openCard(hit); else closeCard();
+  }
+  dragging = false; canvas.classList.remove("drag");
+});
+canvas.addEventListener("wheel", e => {
+  e.preventDefault();
+  const k = Math.exp(-e.deltaY * .0013);
+  const nz = clamp(cam.z * k, .28, 6);
+  const mx = e.clientX, my = e.clientY;
+  cam.x = mx - (mx - cam.x) * (nz / cam.z);
+  cam.y = my - (my - cam.y) * (nz / cam.z);
+  cam.z = nz;
+}, { passive: false });
+
+function pick(sx, sy){
+  let best = null, bd = 1e9;
+  for(const c of CATS){
+    if(!visible(c)) continue;
+    const p = catPos(c), s = toScreen(p.x, p.y);
+    const d = (s.x - sx) ** 2 + (s.y - sy) ** 2;
+    const rad = ((2.2 + 3.4 * (c.brightness || .6)) * 3.4 + 12) ** 2;
+    if(d < rad && d < bd){ bd = d; best = c; }
+  }
+  return best;
+}
+
+/* ---------- 详情卡 ---------- */
+function openCard(c){
+  state.selected = c;
+  const card = document.getElementById("card");
+  document.getElementById("cardName").textContent = c.name || c.id;
+  document.getElementById("cardId").textContent = `${c.id} · ${c.coat || "毛色未记"}`;
+  document.getElementById("cardRank").textContent = `${c.rank || "未定衔"} · ${c.title || "未定岗"}`;
+  const img = document.getElementById("cardPhoto");
+  const src = PH(c.photo) || "";
+  img.classList.remove("ph");
+  img.onerror = () => { img.removeAttribute("src"); img.classList.add("ph"); img.alt = "照片缺失"; };
+  img.onload = () => { img.classList.remove("ph"); };
+  if(src){ img.src = src; } else { img.removeAttribute("src"); img.classList.add("ph"); }
+  const body = document.getElementById("cardBody");
+  body.innerHTML = "";
+  const rows = [["出没区", c.area], ["特征", c.features]];
+  for(const [k, v] of rows){
+    if(!v) continue;
+    const d = document.createElement("div"); d.className = "kv";
+    const kk = document.createElement("span"); kk.className = "k"; kk.textContent = k;
+    const vv = document.createElement("span"); vv.textContent = v;
+    d.append(kk, vv); body.append(d);
+  }
+  if(c.bio){
+    const b = document.createElement("div"); b.id = "cardBio"; b.textContent = c.bio;
+    body.append(b);
+  }
+  document.getElementById("cardMeta").innerHTML =
+    `<span>星等 ${c.brightness} ｜ 照片 ${c.photoCount || 1} 张</span>` +
+    `<span>置信度 ${c.confidence || "—"}</span>`;
+  card.classList.add("on");
+}
+function makePlaceholder(){
+  const d = document.createElement("div");
+  d.id = "cardPhoto"; d.className = "ph";
+  d.textContent = "照片缺失";
+  return d;
+}
+function closeCard(){
+  state.selected = null;
+  document.getElementById("card").classList.remove("on");
+  const img = document.getElementById("cardPhoto");
+  if(img){ img.style.display = ""; img.classList.remove("ph"); }
+}
+document.getElementById("cardClose").addEventListener("click", closeCard);
+addEventListener("keydown", e => { if(e.key === "Escape") closeCard(); });
+
+/* ---------- 图例 ---------- */
+function buildLegend(){
+  const groups = new Map();
+  for(const c of CATS){
+    const g = c.coatGroup || "其他";
+    if(!groups.has(g)) groups.set(g, { color: c.starColor || "200,200,220", n: 0 });
+    groups.get(g).n++;
+  }
+  const box = document.getElementById("legendRows");
+  box.innerHTML = "";
+  const sorted = [...groups.entries()].sort((a, b) => b[1].n - a[1].n);
+  for(const [g, info] of sorted){
+    const row = document.createElement("div");
+    row.className = "row"; row.dataset.group = g;
+    row.innerHTML = `<span class="dot" style="background:rgb(${info.color});box-shadow:0 0 8px rgba(${info.color},.8)"></span>` +
+                    `<span>${g}</span><span class="cnt">${info.n}</span>`;
+    row.addEventListener("click", () => {
+      if(state.activeGroups.has(g)) state.activeGroups.delete(g);
+      else state.activeGroups.add(g);
+      row.classList.toggle("on", state.activeGroups.has(g));
+    });
+    box.append(row);
+  }
+  const counts = CATS.map(c => c.photoCount || 1);
+  const total = counts.reduce((a, b) => a + b, 0);
+  document.getElementById("magFoot").textContent =
+    `共 ${CATS.length} 颗星 · 收录照片 ${total} 张 · 最亮 ${Math.max(...CATS.map(c=>c.brightness||0),0)} 星等`;
+}
+
+/* ---------- 搜索 ---------- */
+const searchEl = document.getElementById("search");
+searchEl.addEventListener("input", () => {
+  state.query = searchEl.value.trim().toLowerCase();
+  searchEl.classList.toggle("miss", !!state.query && CATS.filter(visible).length === 0);
+});
+
+/* ---------- 工具条 ---------- */
+function bindChip(id, key, after){
+  const el = document.getElementById(id);
+  const toggle = () => { state[key] = !state[key]; el.classList.toggle("on", state[key]); after && after(); };
+  el.addEventListener("click", toggle);
+  el.addEventListener("keydown", e => { if(e.key === "Enter" || e.key === " "){ e.preventDefault(); toggle(); } });
+}
+bindChip("btnZones", "showZones");
+bindChip("btnOrbit", "orbit");
+bindChip("btnNet", "net");
+document.getElementById("btnReset").addEventListener("click", () => { fitView(); closeCard(); });
+document.getElementById("btnAll").addEventListener("click", () => {
+  state.activeGroups.clear(); state.query = ""; searchEl.value = "";
+  searchEl.classList.remove("miss");
+  document.querySelectorAll("#legendRows .row").forEach(r => r.classList.remove("on"));
+  closeCard();
+});
+
+/* ---------- 启动 ---------- */
+function boot(){
+  resize();
+  buildLegend();
+  mapImg.onload = () => { mapReady = true; };
+  mapImg.onerror = () => { mapReady = false; };
+  mapImg.src = PH(MAP_SRC);
+  requestAnimationFrame(frame);
+}
+boot();
+</script>
+</body>
+</html>
