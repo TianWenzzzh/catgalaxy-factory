@@ -62,6 +62,17 @@ python -m venv .venv
 - **相对路径版**：`HTML + assets/photos/*.jpg + assets/map.jpg`，体积小、便于二次编辑，但必须整包解压后打开。
 - **内嵌 base64 版**：照片与底图切成 `assets/photo-data-NN.js`（每片 ≤1.5MB）内嵌，HTML 双击即开、可直接上传比赛平台，体积约为照片总量的 1.37 倍。
 
+### 大项目要多久、吃多少内存（中北全量实测：76 只猫 / 75 张手机原图 266.7MB）
+
+| 环节 | 实测 | 做法 |
+|---|---|---|
+| 上传并压缩 75 张 | **6.35s**（串行 16.35s，2.58x） | 压缩是纯 CPU 活，走 `ProcessPoolExecutor`（4 工、每批 16 张），整个上传只建一个池，4 张以下仍串行 |
+| 生成 relative | 0.63s，峰值 **0.98MB** | 照片逐张读盘逐张写，不把整册图廊抱在手里 |
+| 生成 inline | 0.88s，峰值 **11.4MB**（改前 87.21MB） | 先只 `stat` 出字节数定好分片边界，再逐片读盘、编码、写出 |
+
+两种形态的峰值都**不随照片数增长**（inline 10/30/75 张分别是 7.43/10.22/10.92MB），
+这在 3000 张照片的上限场景才真正要紧——按改前的写法，顶格要约 3.5GB。
+
 ## 四、命令行验收
 
 ```bash
@@ -79,7 +90,7 @@ python -m venv .venv
 .venv\Scripts\python -m pytest -q
 ```
 
-18 个测试文件、501 条用例：CSV 解析、校验规则、星位映射、模板注入、打包、图片处理、普查解析、归并、标定、名册编辑、并发锁、zip 限额、进度、主题、控制台前端接线、CI 配置，以及端到端 API。核心模块（校验 / 注入 / 打包）均有单测。
+20 个测试文件、648 条用例：CSV 解析、校验规则、星位映射、模板注入、打包、图片处理、普查解析、归并、标定、名册编辑、并发锁、zip 限额、并行压缩、流式落盘、进度、主题、控制台前端接线、CI 配置，以及端到端 API。核心模块（校验 / 注入 / 打包）均有单测。
 
 其中两类不是「测功能」而是「测接线」：
 
@@ -105,7 +116,8 @@ pip install -e ".[dev]"  →  pytest -q  →  python scripts/acceptance.py --cas
 catgalaxy-factory/
 ├─ SPEC.md                     规格：数据注入点契约、14 条校验规则、API、数据流图
 ├─ README.md                   本文件
-├─ 交付报告.md                  完成清单 / 验收证据 / 已知限制 / 次日待办
+├─ 交付报告.md                  第一轮完成清单 / 验收证据 / 已知限制 / 次日待办
+├─ 第二轮冲刺报告.md             第二轮（F8-F11 + 健壮性 + 性能）的完成清单与实测数据
 ├─ pyproject.toml              依赖与 pytest 配置
 ├─ conftest.py                 测试夹具：临时 workspace、造图、造 CSV
 ├─ .github/workflows/ci.yml    CI：ubuntu + windows 双跑 pytest 与 acceptance demo2
@@ -116,9 +128,9 @@ catgalaxy-factory/
 │  ├─ csv_loader.py        F1  编码探测（utf-8-sig/gb18030/…）、列名别名、12 列解析
 │  ├─ validate.py          F2  14 条校验规则 + 照片引用归一
 │  ├─ star_mapper.py       F3  毛色→星色、照片数→星等、出没区→星位分区
-│  ├─ injector.py          F3  模板 token 注入 + base64 分片（按上下文分别转义）
-│  ├─ image_proc.py            照片压缩 / zip 递归解包（含中文文件名修复）/ 校徽重编码 / 默认夜空底图
-│  ├─ packager.py          F5  bundle 落盘 + zip
+│  ├─ injector.py          F3  模板 token 注入 + base64 分片（只 stat 定边界，逐片编码写出）
+│  ├─ image_proc.py            照片压缩（多进程并行）/ zip 递归解包（含中文文件名修复）/ 校徽重编码 / 默认夜空底图
+│  ├─ packager.py          F5  bundle 流式落盘 + zip（照片与分片都接受可迭代对象）
 │  ├─ store.py                 文件系统即数据库：project.json + 操作日志 + 原子读写重试
 │  ├─ locking.py               项目级写互斥（Semaphore，超时 180s）
 │  ├─ progress.py              长任务进度：progress.json + 前端轮询
@@ -131,7 +143,7 @@ catgalaxy-factory/
 ├─ scripts/
 │  ├─ acceptance.py            验收脚本（demo2 / full76 / all）
 │  └─ cleanup.py               工作区回收（默认干跑，--apply 才动手）
-├─ tests/                      18 个测试文件、501 条用例
+├─ tests/                      20 个测试文件、648 条用例
 ├─ docs/
 │  ├─ 跨校落地手册.md            普查到成品的完整 SOP + 脏 CSV 逐码处置清单
 │  └─ 验收证据-*.md             验收脚本产出的实测证据
@@ -210,4 +222,4 @@ CSV 没有的字段由工具推导：
 - 不收录含人脸的照片（F6 解析时会自动告警）；不公布投喂人信息。
 - 名册落在 `workspace/{pid}/roster.csv`。F10 在线编辑**会改写它**（原子替换，每处改动带旧值/新值进操作日志）；要留一份完全未动的原件，请自己另存，或改用「本地改 CSV → 重新上传」。
 
-已知限制与次日待办见 [交付报告.md](交付报告.md)。
+当前状态以 [第二轮冲刺报告.md](第二轮冲刺报告.md) 为准（第一轮「次日待办」已全部实现）；[交付报告.md](交付报告.md) 保留第一轮的过程记录与红线自查。
