@@ -193,6 +193,47 @@ async def shot_calib(tab: Tab, out: Path):
     await tab.shot(out)
 
 
+async def shot_zone_shift(tab: Tab, out: Path):
+    """F8 批量标定：Shift+拖一颗星 = 整分区平移，视觉验收校 4 只同区 → 页脚 4/4。"""
+    await open_project(tab, P_VIS)
+    await gen_and_preview(tab)
+    await tab.ev("(() => { const b = document.getElementById('btnCalibClear'); if (!b.disabled) b.click(); })()")
+    await tab.wait("document.getElementById('calibState').textContent.includes('算法推导')")
+    await asyncio.sleep(1.0)
+    await tab.ev("document.getElementById('btnCalibMode').click()")
+    await tab.wait("document.getElementById('frame').contentWindow.__catgalaxy.info().calibMode")
+    dragged = await tab.ev("""(async () => {
+      const w = document.getElementById('frame').contentWindow, d = w.document;
+      const cv = d.getElementById('sky'), tip = d.getElementById('tip');
+      cv.setPointerCapture = () => {};
+      const r = cv.getBoundingClientRect();
+      const fire = (t, x, y, opt) => (opt && opt.win ? w : cv).dispatchEvent(new w.PointerEvent(
+        t, Object.assign({clientX: x, clientY: y, bubbles: true, pointerId: 7, isPrimary: true}, opt || {})));
+      let anchor = null;
+      outer:
+      for (let y = r.top + 24; y < r.bottom - 24; y += 16)
+        for (let x = r.left + 24; x < r.right - 24; x += 16) {
+          fire('pointermove', x, y);
+          if ((tip.textContent || '').includes('拖动到真实位置')) { anchor = {x, y}; break outer; }
+        }
+      if (!anchor) return [];
+      const tx = anchor.x + r.width * .18, ty = anchor.y + r.height * .12;
+      fire('pointerdown', anchor.x, anchor.y, {shiftKey: true});
+      for (let s = 1; s <= 4; s++)
+        fire('pointermove', anchor.x + (tx - anchor.x) * s / 4, anchor.y + (ty - anchor.y) * s / 4);
+      fire('pointerup', tx, ty, {win: true});
+      await new Promise(res => setTimeout(res, 400));
+      return Object.keys(w.__catgalaxy.getUserCalib());
+    })()""", await_promise=True)
+    if len(dragged) != 4:
+        raise RuntimeError(f"分区平移应写满同区 4 颗星，实际 {dragged}——Shift 分支没生效")
+    await tab.ev("document.getElementById('btnCalibSave').click()")
+    await tab.wait("document.getElementById('calibState').textContent.includes('人工')")
+    await gen_and_preview(tab)
+    await scroll_to(tab, "document.getElementById('frame').closest('.card').scrollIntoView({block:'start'}); window.scrollBy(0,-8)")
+    await tab.shot(out)
+
+
 async def shot_roster_edit(tab: Tab, out: Path):
     """F10 问题行摊开改：两行带 W_BAD_CONFIDENCE，输入框已改未应用。"""
     await open_project(tab, P_BIG)
@@ -227,6 +268,7 @@ SHOTS = [
     ("F8-人工标定2颗-烘焙进页脚", shot_calib),
     ("F9-归并工作台-视觉预排序", shot_merge_order),
     ("F9-无结构照片不发假指纹", shot_merge_nostructure),
+    ("F8-分区平移-Shift拖拽", shot_zone_shift),
     ("F4-星图预览-真实渲染", shot_preview),
     ("F10-名册在线编辑-问题行摊开改", shot_roster_edit),
     ("F11-主题-晨曦橘预设", shot_theme),

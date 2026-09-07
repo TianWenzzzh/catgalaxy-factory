@@ -457,17 +457,36 @@ function frame(ts){
 }
 
 /* ---------- 交互 ---------- */
-let dragging = false, moved = false, lx = 0, ly = 0, dragCat = null;
+let dragging = false, moved = false, lx = 0, ly = 0, dragCat = null, dragZone = null;
 canvas.addEventListener("pointerdown", e => {
   dragging = true; moved = false; lx = e.clientX; ly = e.clientY;
-  dragCat = state.calib ? pick(e.clientX, e.clientY) : null;
+  const hit = state.calib ? pick(e.clientX, e.clientY) : null;
+  if(hit && e.shiftKey){
+    /* 标定漂移往往整片偏：Shift+拖 = 锚点星所在分区全体平移，base 在按下时快照 */
+    dragZone = { zone: hit.zone, anchor: hit, start: toNorm(e.clientX, e.clientY),
+                 base: new Map(CATS.filter(c => c.zone === hit.zone)
+                                   .map(c => [c.id, Object.assign({}, catPos(c))])) };
+    dragCat = null;
+  }else{
+    dragCat = hit;
+  }
   canvas.classList.add("drag"); canvas.setPointerCapture(e.pointerId);
 });
 canvas.addEventListener("pointermove", e => {
   if(dragging){
     const dx = e.clientX - lx, dy = e.clientY - ly;
     if(Math.abs(dx) + Math.abs(dy) > 3) moved = true;
-    if(dragCat){
+    if(dragZone){
+      const n = toNorm(e.clientX, e.clientY);
+      const ox = n.x - dragZone.start.x, oy = n.y - dragZone.start.y;
+      for(const c of CATS.filter(c => c.zone === dragZone.zone)){
+        const b = dragZone.base.get(c.id);
+        const p = catPos(c);
+        p.x = clamp(b.x + ox, 0, 1); p.y = clamp(b.y + oy, 0, 1);
+        USER[c.id] = { x: +p.x.toFixed(4), y: +p.y.toFixed(4) };
+      }
+      updateCalibHint(dragZone.anchor);
+    }else if(dragCat){
       const n = toNorm(e.clientX, e.clientY);
       const p = catPos(dragCat);
       p.x = clamp(n.x, 0, 1); p.y = clamp(n.y, 0, 1);
@@ -485,7 +504,7 @@ canvas.addEventListener("pointermove", e => {
   const tip = document.getElementById("tip");
   if(hit){
     tip.textContent = state.calib
-      ? `${hit.name} · 拖动到真实位置`
+      ? `${hit.name} · 拖动到真实位置（Shift+拖拽=整分区平移）`
       : `${hit.name} · ${hit.rank || "未定衔"} · ${hit.photoCount || 1}张`;
     tip.style.left = (e.clientX + 14) + "px";
     tip.style.top = (e.clientY - 10) + "px";
@@ -493,11 +512,12 @@ canvas.addEventListener("pointermove", e => {
   }else tip.classList.remove("on");
 });
 addEventListener("pointerup", e => {
-  if(dragging && !moved && !dragCat){
+  if(dragging && !moved && !dragCat && !dragZone){
     const hit = pick(e.clientX, e.clientY);
     if(hit) openCard(hit); else closeCard();
   }
   if(dragCat){ saveUserPos(); dragCat = null; }
+  if(dragZone){ saveUserPos(); dragZone = null; }
   dragging = false; canvas.classList.remove("drag");
 });
 canvas.addEventListener("wheel", e => {
