@@ -160,7 +160,17 @@ def guard_workspace() -> Path | None:
     return ws
 
 
+def _utf8_stdio() -> None:
+    """重定向到文件/管道时 stdout 会退回本机编码（GBK），脚本里的 ⚠ 编不出去就崩，自己拨到 UTF-8。
+    已经是 UTF-8 就不动：测试会直接调 main()，那时 stdout 是 pytest 的捕获流。"""
+    for stream in (sys.stdout, sys.stderr):
+        enc = (getattr(stream, "encoding", "") or "").lower().replace("-", "").replace("_", "")
+        if enc != "utf8" and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _utf8_stdio()
     ap = argparse.ArgumentParser(description="按「多久没动过」清理工作区里的项目目录")
     ap.add_argument("--before", help="时间窗，如 7d / 24h / 2w；不填则只出统计")
     ap.add_argument("--keep-latest", type=int, default=0,

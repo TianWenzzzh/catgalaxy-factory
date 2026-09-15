@@ -737,7 +737,18 @@ def case_full76(client: TestClient) -> Evidence:
     return ev
 
 
+def _utf8_stdio() -> None:
+    """stdout 被重定向到文件/管道时 Python 会用本机编码（这台机器是 GBK），
+    脚本里的 ↔ ✅ ❌ 编不出去就中途 UnicodeEncodeError 崩——自己拨到 UTF-8，不指望调用方设环境变量。
+    已经是 UTF-8 就不动：测试会直接调 main()，那时 stdout 是 pytest 的捕获流。"""
+    for stream in (sys.stdout, sys.stderr):
+        enc = (getattr(stream, "encoding", "") or "").lower().replace("-", "").replace("_", "")
+        if enc != "utf8" and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main() -> int:
+    _utf8_stdio()
     ap = argparse.ArgumentParser(description="喵星图工厂验收脚本")
     ap.add_argument("--case", choices=("demo2", "full76", "all"), default="all")
     args = ap.parse_args()
