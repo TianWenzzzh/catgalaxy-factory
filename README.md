@@ -15,15 +15,20 @@
 ## 一、安装
 
 ```bash
-cd D:\QoderProjects\catgalaxy-factory
+# 拿代码（任何一台电脑都从 GitHub 开始）
+git clone https://github.com/TianWenzzzh/catgalaxy-factory.git
+cd catgalaxy-factory
 
-# 方式 A：uv（推荐，本机已有）
+# 方式 A：uv（推荐，装了 uv 就是两行）
 uv venv
 uv pip install -e ".[dev]"
 
 # 方式 B：pip
 python -m venv .venv
 .venv\Scripts\pip install -e ".[dev]"
+
+# 跑一遍测试确认环境就绪（730 条，全绿约 3 分钟）
+.venv\Scripts\python -m pytest -q
 ```
 
 ## 二、启动

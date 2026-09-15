@@ -1,0 +1,32 @@
+MIT License
+
+Copyright (c) 2026 TianWenzzzh（中北大学）· https://github.com/TianWenzzzh
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+## 范围说明（与主项目许可衔接）
+
+本仓库许可的是**生成器代码与方法论**（app/、scripts/、tests/ 及 docs/ 文字）。
+
+用本工具生成并打包出去的星图 HTML **内嵌了各校实拍照片与普查数据**，那部分
+沿用主项目的双层许可：代码 MIT / 数据照片 CC BY-NC-SA 4.0——转载需署名并附
+主仓库链接，禁止商业用途。全文见主仓库
+https://github.com/TianWenzzzh/nuc-cat-starmap 的 LICENSE 文件。
