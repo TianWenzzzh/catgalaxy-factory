@@ -61,7 +61,11 @@ def snapshot_for_client(pid: str) -> dict:
     于是一个好好在跑的任务被报成已中断。
     """
     rec = read(pid)
-    rec["server_now"] = time.time()
+    # updated_at 落盘时是 round(x, 3)（1ms 量化、可能向上取整），记录刚落盘
+    # 不到半毫秒就被轮询时，原始 time.time() 会比它还小。前端正是拿这个差值
+    # 算「多久没进展」——本函数存在的意义就是不让它算出负数，所以钳到不小于
+    # updated_at，误差最多 0.5ms，换来差值恒非负的硬保证。
+    rec["server_now"] = max(time.time(), rec.get("updated_at", 0.0))
     rec["stale_after"] = STALE_AFTER
     return rec
 
