@@ -391,6 +391,10 @@ def test_retry_read_survives_a_concurrent_atomic_replace(tmp_path):
     try:
         for i in range(120):
             atomic_write_text(dest, json.dumps({"v": i, "pad": "x" * 2000}))
+            # 2ms 微歇：撕裂读保护要的是「读与替换并发」，不是极限写频率。
+            # CI 的 2 核 runner 带 Defender，背靠背重写会触发扫描追不上写入、
+            # 连续占住目标文件，把写方 4s 重试预算都耗光（GitHub 实测 2026-09-15）。
+            time.sleep(0.002)
     finally:
         stop.set()
         for t in threads:

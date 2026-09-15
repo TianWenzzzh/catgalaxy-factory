@@ -78,8 +78,11 @@ def tmp_sibling(dest: Path) -> Path:
 
 
 # Windows 的替换重试参数。写死在模块级是为了测试能调小——
-# 真要验证重试分支，总不能让测试等 1.2 秒。
-REPLACE_ATTEMPTS = 60
+# 真要验证重试分支，总不能让测试等 4 秒。
+# 60 次（1.2s）在 CI 的 2 核 Windows runner 上被实测打穿：Defender 对高频重写的
+# 同一个文件反复触发扫描，扫描句柄能连续占住目标超过 1.2s，重试耗尽直接炸。
+# 200 次（4s）给杀毒扫描留足收尾时间；本地实测仍秒级返回，不构成可感知延迟。
+REPLACE_ATTEMPTS = 200
 REPLACE_SLEEP = 0.02
 
 # 共享冲突：文件被别人开着。winerror 32/33 是 Windows 的 sharing violation，
