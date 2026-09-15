@@ -29,6 +29,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Windows runner 的 Defender 实时扫描会长时间占住 pytest 临时目录里被
+      # 高频重写的文件（WinError 5 连续 4 秒不放手，2026-09-15 实测把写方
+      # 200 次重试预算都耗光；本机同测试 730 全绿）。runner 是一次性的隔离
+      # 环境，排除临时目录只影响这台机器；真实用户杀软的瞬态占用仍由
+      # atomic_replace 的重试兜住，不在 CI 上假装他们不存在。
+      - name: Windows 排除临时目录的实时扫描
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-MpPreference -ExclusionPath "$env:TEMP", "$env:RUNNER_TEMP"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
