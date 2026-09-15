@@ -384,6 +384,12 @@ def test_retry_read_survives_a_concurrent_atomic_replace(tmp_path):
                 failures.append(f"permission {exc.errno}")
             except json.JSONDecodeError:
                 torn.append(1)
+            # 1ms 微歇：不歇的读循环在 2 核 runner 上近乎 100% 占住文件句柄，
+            # 写方的 os.replace 是点采样，200 次重试也全落在占用窗口里
+            # （GitHub 实测同代码一绿一红，纯调度运气）。歇 1ms 把占用率
+            # 压到五成以下，写方命中空窗从碰运气变成必然；撕裂读与重试
+            # 吸收两条保护照样被真并发覆盖——真实读者是请求处理器，本来就有间隙。
+            time.sleep(0.001)
 
     threads = [threading.Thread(target=reader) for _ in range(3)]
     for t in threads:
