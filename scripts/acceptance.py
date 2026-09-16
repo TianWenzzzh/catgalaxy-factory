@@ -4,7 +4,8 @@
     python scripts/acceptance.py --case full76     # 真实名册 76 只全量回归
     python scripts/acceptance.py --case all
 
-走真实 HTTP 接口（进程内 TestClient），产物落在 workspace/，证据写入 docs/。E 盘全程只读。
+走真实 HTTP 接口（进程内 TestClient），产物落在 workspace/，证据写入 docs/。总库全程只读
+（根由 STARMAP_HOME 决定，缺省 E:\猫咪星图_总库，Linux 上指向挂载点即可满血验收）。
 """
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ import argparse
 import csv
 import io
 import json
+import os
 import re
 import sys
 import zipfile
@@ -27,7 +29,8 @@ from PIL import Image, ImageDraw  # noqa: E402
 from app import config, csv_loader  # noqa: E402
 from app.main import app  # noqa: E402
 
-E_ROOT = Path(r"E:\猫咪星图_总库")
+# 总库根：STARMAP_HOME 优先（Linux 挂载点不叫 E:），缺省这台 Windows 机的 E 盘
+E_ROOT = Path(os.environ.get("STARMAP_HOME") or r"E:\猫咪星图_总库")
 SKELETON = E_ROOT / "12_跨校复制包" / "示例校_空数据包骨架"
 REAL_ROSTER = E_ROOT / "07_普查原始数据" / "猫咪名册.csv"
 PHOTO_DIRS = [E_ROOT / "08_原始照片视频" / "照片视频",

@@ -8,6 +8,8 @@ from app.star_mapper import (BOUND_X, BOUND_Y, assign_anchors, brightness_from_c
                              join_features, layout_positions, make_bio, split_features,
                              star_radius, to_cat_entry, zone_of, zone_stats)
 
+from conftest import E_ROOT
+
 
 def _row(**kw) -> CatRow:
     base = dict(line=2, id="CAT-001", name="墩墩", rank="喵校长", title="总揽全校猫务",
@@ -239,8 +241,7 @@ def test_id_gaps_empty():
 
 def test_real_roster_76_maps_cleanly():
     """用 07_普查原始数据 的真实 76 只名册做映射回归。"""
-    from pathlib import Path
-    src = Path(r"E:\猫咪星图_总库\07_普查原始数据\猫咪名册.csv")
+    src = E_ROOT / "07_普查原始数据" / "猫咪名册.csv"
     if not src.exists():
         import pytest
         pytest.skip("E 盘参考数据不可用")

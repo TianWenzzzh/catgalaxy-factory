@@ -9,6 +9,8 @@ from app.census_parser import (main_coat, merge_suggestions, parse_batch,
                                records_to_draft_csv, scene_to_area)
 from app.config import ROSTER_COLUMNS
 
+from conftest import E_ROOT
+
 SAMPLE = """校园猫咪照片普查 batch1（格式：文件名 | 猫数量 | 主体毛色花纹 | 显著特征 | 场景线索 | 画质 | 正脸 | 人脸）
 
 0FEE7CB5FD21467F63DAA083BA1FDDFA.jpg | 1 | 橘白（橘背橘头，胸腹及四肢内侧发白） | 短毛成年，体型中等，从侧后方拍摄 | 室内宿舍：红白格桌布木桌下、军绿暖水瓶（vivo水印 太原 2026-03-06 19:20） | A | 否 | 无
@@ -164,7 +166,7 @@ def test_merge_suggestions_empty():
 # ---------- 真实数据回归（只读 E 盘）----------
 
 def test_real_batch1_parses():
-    src = Path(r"E:\猫咪星图_总库\07_普查原始数据\普查-batch1.txt")
+    src = E_ROOT / "07_普查原始数据" / "普查-batch1.txt"
     if not src.exists():
         pytest.skip("E 盘参考数据不可用")
     text = src.read_text(encoding="utf-8", errors="replace")

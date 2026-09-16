@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
-from conftest import make_jpeg
+from conftest import E_ROOT, make_jpeg
 
 
 @pytest.fixture
@@ -360,8 +360,7 @@ def test_summary_without_report(client):
 
 def test_full_76_regression(client):
     """用 E 盘真实名册 76 只走通全流程，校验数据完整、照片全部可显示。"""
-    from pathlib import Path
-    src = Path(r"E:\猫咪星图_总库\07_普查原始数据\猫咪名册.csv")
+    src = E_ROOT / "07_普查原始数据" / "猫咪名册.csv"
     if not src.exists():
         pytest.skip("E 盘参考数据不可用")
 

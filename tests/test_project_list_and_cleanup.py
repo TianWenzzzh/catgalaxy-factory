@@ -18,6 +18,8 @@ from fastapi.testclient import TestClient
 from app import config, store
 from app.main import app
 
+from conftest import E_ROOT
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import cleanup  # noqa: E402
 
@@ -172,7 +174,7 @@ def test_is_safe_workspace(ws, tmp_path):
     assert cleanup.is_safe_workspace(ws, tmp_path) is True
     assert cleanup.is_safe_workspace(tmp_path, tmp_path) is True
     assert cleanup.is_safe_workspace(tmp_path, tmp_path / "workspace") is False
-    assert cleanup.is_safe_workspace(Path(r"E:\猫咪星图_总库"), tmp_path) is False
+    assert cleanup.is_safe_workspace(E_ROOT, tmp_path) is False
 
 
 def test_guard_refuses_a_workspace_outside_the_project(ws, monkeypatch, capsys):

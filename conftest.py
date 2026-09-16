@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import os
 import sys
 from pathlib import Path
 
@@ -13,6 +14,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app import config, store  # noqa: E402
+
+# 真实数据总库的根：STARMAP_HOME 优先，缺省这台 Windows 机的 E 盘。
+# Linux 上满血回归：export STARMAP_HOME=<总库挂载点>（07 普查/08 照片/09 底图在其下）；
+# 不设也没事，依赖总库的用例会按路径不存在自动跳过。
+E_ROOT = Path(os.environ.get("STARMAP_HOME") or r"E:\猫咪星图_总库")
 
 
 @pytest.fixture
