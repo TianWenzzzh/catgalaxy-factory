@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import hashlib
 import io
 import json
 import shutil
@@ -747,14 +748,20 @@ def delete_calib(pid: str) -> dict:
 # ---------- 路由：F11 星图主题化 ----------
 
 def _logo_url(pid: str) -> str:
-    """带 mtime 版本号：路径固定，不加版本浏览拿到的会是换徽章之前的那张。"""
+    """带内容版本号：路径固定，不加版本浏览拿到的会是换徽章之前的那张。
+
+    版本取内容哈希而非 mtime——Windows 粗时钟刻度内连传两张新徽章，
+    mtime_ns 会一毫不差，版本号不变浏览器就永远吃旧缓存（本机实测踩过；
+    Linux 的 ns 级时钟撞不出来，所以 CI 一直绿）。内容寻址还有个附带好处：
+    重复传同一张图版本不变，缓存照样命中。
+    """
     p = store.logo_path(pid)
     if not p.exists():
         return ""
     try:
-        v = p.stat().st_mtime_ns
+        v = hashlib.md5(p.read_bytes()).hexdigest()[:12]
     except OSError:
-        v = 0
+        v = ""
     return f"/api/projects/{pid}/logo?v={v}"
 
 
