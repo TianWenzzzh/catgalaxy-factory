@@ -358,5 +358,6 @@ def render_starmap_v29(*, school: str, rows: list[CatRow],
         photo_loading=photo_loading,
         survey_date=generated_on or date.today().strftime("%Y-%m"),
         product=product, ls_prefix=ls_prefix, version=version,
-        theme_css=css, logo_intro=logo_tag_html, logo_topbar=logo_tag_html)
+        theme_css=css, logo_intro=logo_tag_html, logo_topbar=logo_tag_html,
+        footer_signature=(theme.footer_signature if theme else ""))
     return sr.render(inp)

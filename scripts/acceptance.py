@@ -234,7 +234,8 @@ def verify_zip_contents(ev: Evidence, zf: zipfile.ZipFile, cats: list[dict],
         # 内嵌形态下 CATS.photo 仍是 assets/photos/xxx.jpg，但它只是 PH() 查 base64 的键，
         # 不构成文件依赖；真正会断链的是 <img src> 与 CSS url()。
         img_refs = re.findall(r'<img[^>]+src="([^"]+)"', html)
-        img_refs += re.findall(r'url\((?!["\']?data:)([^)"\']+)\)', html)
+        # url(#…) 是页面内 SVG 渐变引用，不是文件依赖
+        img_refs += re.findall(r'url\((?!["\']?data:|#)([^)"\']+)\)', html)
         ev.check("解压后双击即开（不依赖任何外部图片文件）",
                  bool(refs) and not unresolved and not img_refs,
                  f"HTML 仅引用同目录 JS {len(refs)} 个且全部在包内；"
@@ -297,12 +298,26 @@ def verify_calib(client: TestClient, ev: Evidence, pid: str, n_cats: int) -> Non
     ev.check("F8 标定后重新生成", r.status_code == 200 and d["calib"]["manual"] == len(manual),
              f"烘焙人工星位 {d['calib']['manual']}/{d['calib']['total']} 颗")
     html = client.get(d["preview_url"]).text
-    baked = f'"{ids[0]}":{{"x":{CALIB_XY["x"]},"y":{CALIB_XY["y"]}}}'
-    ev.check("F8 人工坐标已烘焙进产物 CALIB", baked in html,
-             f"产物里找到 {baked}" if baked in html else f"产物里找不到 {baked}")
-    ev.check("F8 产物页脚注明标定比例",
-             f"星位人工标定 {len(manual)}/{d['calib']['total']}" in html,
-             f"星位人工标定 {len(manual)}/{d['calib']['total']}")
+    if ENGINE == "v29":
+        # v29 用 v2.7 口径烘焙（js_num3：去前导零），页脚语义改为标定注释
+        def _n3(v: float) -> str:
+            s = f"{v:.3f}".rstrip("0").rstrip(".")
+            return s[1:] if s.startswith("0.") else s
+        baked = re.search(
+            rf'"{ids[0]}":\{{x:{_n3(CALIB_XY["x"])},y:{_n3(CALIB_XY["y"])}\}}',
+            html)
+        ev.check("F8 人工坐标已烘焙进产物 CALIB", bool(baked),
+                 f"产物里{'找到' if baked else '找不到'} v29 口径标定 "
+                 f"{ids[0]}:x={_n3(CALIB_XY['x'])},y={_n3(CALIB_XY['y'])}")
+        ev.check("F8 产物注明人工标定生效", "人工固化校准坐标" in html,
+                 "CALIB 引导注释：人工固化校准坐标 · 手动校准仍优先覆盖")
+    else:
+        baked = f'"{ids[0]}":{{"x":{CALIB_XY["x"]},"y":{CALIB_XY["y"]}}}'
+        ev.check("F8 人工坐标已烘焙进产物 CALIB", baked in html,
+                 f"产物里找到 {baked}" if baked in html else f"产物里找不到 {baked}")
+        ev.check("F8 产物页脚注明标定比例",
+                 f"星位人工标定 {len(manual)}/{d['calib']['total']}" in html,
+                 f"星位人工标定 {len(manual)}/{d['calib']['total']}")
 
     r = client.delete(f"/api/projects/{pid}/calib")
     back = client.get(f"/api/projects/{pid}/calib").json()
@@ -409,11 +424,14 @@ def verify_theme(client: TestClient, ev: Evidence, pid: str,
                  "--bg:#1a0d09" in html and "--gold:#ff8800" in html
                  and '"Kaiti SC"' in html,
                  "--bg 取预设晨曦橘 #1a0d09，--gold 取自定义 #ff8800，标题字体栈含 Kaiti SC")
+        # 出处标记按引擎区分：v1 是页脚生成器落款；v29 是开场版权行
+        provenance = ("由「喵星图工厂 CatGalaxy Factory」自动生成" if ENGINE != "v29"
+                      else "原创作品 © 2026 TianWenzzzh")
         ev.check(f"F11 署名以转义文本追加在出处之后（{form}）",
                  "&lt;script&gt;alert(1)&lt;/script&gt;" in html
                  and "<script>alert(1)</script>" not in html
-                 and html.index("由「喵星图工厂 CatGalaxy Factory」自动生成")
-                 < html.index("&lt;script&gt;alert(1)"),
+                 and provenance in html
+                 and html.index(provenance) < html.index("&lt;script&gt;alert(1)"),
                  f"署名 {len(d['theme']['signature'])} 字，标签已转义为纯文本，出处未被替换")
         ev.check(f"F11 校徽已进产物（{form}）", want_logo in html,
                  "base64 内嵌，单文件双击即开" if form == "inline"
@@ -771,7 +789,8 @@ def main() -> int:
                     help="渲染引擎：缺省跟随应用默认（当前 v29）；"
                          "显式 v1 走旧 717 模板（deprecated）")
     args = ap.parse_args()
-    ENGINE = args.engine
+    # None = 跟随应用缺省：解析成实际引擎，后面 F8/F11 的引擎感知断言要用
+    ENGINE = args.engine if args.engine is not None else config.ACTIVE_ENGINE
 
     client = TestClient(app)
     cases = [("demo2", case_demo2, "验收证据-场景1-空骨架2行.md"),

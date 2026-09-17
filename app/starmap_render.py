@@ -290,6 +290,7 @@ class V29RenderInput:
     skill_foot_line: Optional[str] = None
     soul_line: Optional[str] = None
     calib_note: Optional[str] = None
+    footer_signature: str = ""           # 工厂主题落款（追加在页脚，转义后输出）
     # ---- 可选富数据（工厂一般不用，给 05 全量再基线留口） ----
     areas: Optional[list[dict]] = None
     area_keys: Optional[list] = None
@@ -402,7 +403,9 @@ def render(inp: V29RenderInput) -> V29Bundle:
                           f"《归并决策摘要.md》，欢迎抽查。",
         "stats_foot": f"数据源：猫咪名册.csv · {html_esc(survey_date)} 实地普查 · "
                       f"仅{html_esc(short)}校园<br>"
-                      f"星色 = 毛色 ｜ 环绕光点 = 收录照片数",
+                      f"星色 = 毛色 ｜ 环绕光点 = 收录照片数"
+                      + (f"<br>✍ {html_esc(inp.footer_signature)}"
+                         if inp.footer_signature else ""),
         "banner_sub": f" * 底图: {map_ref} | 数据: CATS（{n}只真猫名册 · "
                       f"{js_str(survey_date)}普查）",
         "cats_lead_comment":
