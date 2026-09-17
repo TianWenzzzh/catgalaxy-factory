@@ -301,3 +301,50 @@ def generation_stats(rows: list[CatRow]) -> dict:
         "coats": coat_stats(rows),
         "photos": sum(max(1, r.photo_count) for r in rows),
     }
+
+
+# ───────────────────── v29 引擎（T6 收敛，与 meow-starmap 同模板） ─────────────────────
+
+def canonical_v29_cats(rows: list[CatRow],
+                       calib_override: Optional[dict] = None
+                       ) -> tuple[list[dict], dict]:
+    """CatRow → v29 CATS 规范 12 字段（裁掉工厂扩展键）+ 规范化 CALIB。"""
+    from . import starmap_render as sr
+    entries, derived = build_cat_entries(rows, calib_override=calib_override)
+    cats = [{k: e[k] for k in sr.CAT_FIELDS} for e in entries]
+    return cats, derived
+
+
+def render_starmap_v29(*, school: str, rows: list[CatRow],
+                       photos: dict[str, bytes], map_bytes: bytes,
+                       map_key: str = "map.jpg",
+                       map_filename: str = "assets/map.jpg",
+                       calib: Optional[dict] = None,
+                       photo_loading: str = "lazy",
+                       theme: Optional[Theme] = None,
+                       logo_tag_html: str = "",
+                       generated_on: Optional[str] = None,
+                       product: Optional[str] = None,
+                       version: str = "v1.1.0") -> "V29Bundle":
+    """v29 全特性模板渲染（影廊/护照/分享卡/懒加载/F11 主题校徽）。
+
+    返回 starmap_render.V29Bundle（html + 分片分组）；不碰文件系统。
+    旧 render_starmap 保持原样，调用方用 engine/配置选择，默认仍走旧引擎。
+    所有用户文本：CATS 经 js 转义；主题 CSS 只接受 Theme 规范化产物；
+    校徽 HTML 必须来自 logo_tag() 的白名单整标签（调用方不得自行拼接）。
+    """
+    from . import starmap_render as sr
+
+    cats, derived = canonical_v29_cats(rows, calib_override=calib)
+    css = css_block(theme)
+    if logo_tag_html and not logo_tag_html.lstrip().startswith('<img class="logo"'):
+        raise ValueError("v29 校徽只接受 injector.logo_tag() 产出的白名单 <img>")
+
+    inp = sr.V29RenderInput(
+        school=school, cats=cats, photos=dict(photos), map_bytes=map_bytes,
+        map_key=map_key, map_src=map_filename, calib=derived,
+        photo_loading=photo_loading,
+        survey_date=generated_on or date.today().strftime("%Y-%m"),
+        product=product, version=version,
+        theme_css=css, logo_intro=logo_tag_html, logo_topbar=logo_tag_html)
+    return sr.render(inp)
