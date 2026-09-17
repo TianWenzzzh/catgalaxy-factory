@@ -235,3 +235,15 @@ CSV 没有的字段由工具推导：
 - 增行**不会替你编编号**：编号留空就报 `E_BAD_ID`，由人决定用哪个号（自动补号会让「弃用编号不复用」这条红线失效）。删行**不会删照片**：那张照片会以 `I_PHOTO_UNUSED` 浮到报告上，要不要清由人决定。
 
 当前状态以 [第三轮冲刺报告.md](第三轮冲刺报告.md) 为准（第二轮 §七 待办已落地 4/7）；[第二轮冲刺报告.md](第二轮冲刺报告.md) 与 [交付报告.md](交付报告.md) 保留过程记录与红线自查，被推翻处均就地标注。
+
+
+## 仓库关系（T6 收敛后）
+
+- **本仓（catgalaxy-factory）= 渲染上游**：`app/starmap_render.py` 是 v29 渲染的唯一真相，
+  对 `schools/nuc` 数据包的输出与开放模板托管产物逐字节一致（v1.1.0 起，默认引擎 v29）。
+- [meow-starmap](https://github.com/TianWenzzzh/meow-starmap) = 模板/数据开源门面：
+  `tools/starmap_render.py` 为本仓渲染器的 vendor 快照（sha256 由
+  `tests/test_vendor_snapshot.py` 锁定），升上游后同步快照再发版。
+- [nuc-cat-starmap](https://github.com/TianWenzzzh/nuc-cat-starmap) = 中北大学实例：
+  v2.8 起的产物由本仓 `scripts/export_v29_product.py` 从 schools/nuc 数据包直出。
+- 跨三仓发版顺序：**工厂 → 16 同步快照 → 05 直出**；顺序与红线见工厂与 16 的 CI/测试。
