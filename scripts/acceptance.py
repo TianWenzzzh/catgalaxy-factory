@@ -37,6 +37,9 @@ PHOTO_DIRS = [E_ROOT / "08_原始照片视频" / "照片视频",
               E_ROOT / "08_原始照片视频" / "补充视频照片"]
 DOCS = ROOT / "docs"
 
+# 渲染引擎：--engine 选择（v1|v29），透传进每次 generate 请求（施工书 F5）
+ENGINE = "v1"
+
 
 class Evidence:
     """把每一步的实测结果攒成 Markdown，作为交付报告的验收证据。"""
@@ -280,7 +283,7 @@ def verify_calib(client: TestClient, ev: Evidence, pid: str, n_cats: int) -> Non
              r2.json()["stats"]["manual"] == len(manual),
              f"仍是人工 {r2.json()['stats']['manual']} 颗")
 
-    r = client.post(f"/api/projects/{pid}/generate", json={"form": "relative"})
+    r = client.post(f"/api/projects/{pid}/generate", json={"form": "relative", "engine": ENGINE})
     d = r.json()
     ev.check("F8 标定后重新生成", r.status_code == 200 and d["calib"]["manual"] == len(manual),
              f"烘焙人工星位 {d['calib']['manual']}/{d['calib']['total']} 颗")
@@ -384,7 +387,7 @@ def verify_theme(client: TestClient, ev: Evidence, pid: str,
              f"HTTP {r.status_code}：{r.json().get('detail', '')[:60]}")
 
     for form in forms:
-        r = client.post(f"/api/projects/{pid}/generate", json={"form": form})
+        r = client.post(f"/api/projects/{pid}/generate", json={"form": form, "engine": ENGINE})
         if not ev.check(f"F11 带主题重新生成（{form}）",
                         r.status_code == 200 and r.json()["theme"]["preset"] == "dawn",
                         "" if r.status_code == 200 else r.text[:200]):
@@ -421,7 +424,7 @@ def verify_theme(client: TestClient, ev: Evidence, pid: str,
     client.delete(f"/api/projects/{pid}/logo")
     client.delete(url)
     back = client.get(url).json()
-    d = client.post(f"/api/projects/{pid}/generate", json={"form": "relative"}).json()
+    d = client.post(f"/api/projects/{pid}/generate", json={"form": "relative", "engine": ENGINE}).json()
     html = client.get(d["preview_url"]).text
     ev.check("F11 恢复默认主题后产物回到旧版长相",
              back["theme"]["preset"] == DEFAULT_PRESET and back["has_logo"] is False
@@ -482,7 +485,7 @@ def verify_roster_rows(client: TestClient, ev: Evidence, pid: str, n_cats: int) 
              f"编号 {new_id}（避开已用的 {len(used)} 个号），可入图 {s['valid_rows']} 行，"
              f"错误 {s['error_count']} 警告 {s['warning_count']} 提示 {s['info_count']}")
 
-    d = client.post(f"/api/projects/{pid}/generate", json={"form": "relative"}).json()
+    d = client.post(f"/api/projects/{pid}/generate", json={"form": "relative", "engine": ENGINE}).json()
     ev.check("F10 新增的猫进了星图产物", d["cats"] == n_cats + 1,
              f"CATS {d['cats']} 条（原 {n_cats} 条 + 新增 1 条），"
              f"zip {d['zip_bytes'] // 1024}KB")
@@ -499,7 +502,7 @@ def verify_roster_rows(client: TestClient, ev: Evidence, pid: str, n_cats: int) 
              f"数据行 {rows0 + 1} → {s['total_rows']}；工作区照片 {n_after} 张未减少；"
              f"I_PHOTO_UNUSED {len(unused)} 条：{unused[0]['message'][:60]}")
 
-    d = client.post(f"/api/projects/{pid}/generate", json={"form": "relative"}).json()
+    d = client.post(f"/api/projects/{pid}/generate", json={"form": "relative", "engine": ENGINE}).json()
     ev.check("F10 删掉的猫不再出现在星图里", d["cats"] == n_cats,
              f"CATS 回到 {d['cats']} 条（期望 {n_cats}）")
 
@@ -614,7 +617,7 @@ def run_flow(client: TestClient, ev: Evidence, *, school: str, subtitle: str,
              f"{len(r.text)} 字符 Markdown")
 
     for form in forms:
-        r = client.post(f"/api/projects/{pid}/generate", json={"form": form})
+        r = client.post(f"/api/projects/{pid}/generate", json={"form": form, "engine": ENGINE})
         if not ev.check(f"F3+F5 生成并打包（{form}）", r.status_code == 200,
                         "" if r.status_code == 200 else r.text[:200]):
             continue
@@ -751,10 +754,14 @@ def _utf8_stdio() -> None:
 
 
 def main() -> int:
+    global ENGINE
     _utf8_stdio()
     ap = argparse.ArgumentParser(description="喵星图工厂验收脚本")
     ap.add_argument("--case", choices=("demo2", "full76", "all"), default="all")
+    ap.add_argument("--engine", choices=("v1", "v29"), default="v1",
+                    help="渲染引擎：v1=旧模板（缺省），v29=v29 全特性+懒加载")
     args = ap.parse_args()
+    ENGINE = args.engine
 
     client = TestClient(app)
     cases = [("demo2", case_demo2, "验收证据-场景1-空骨架2行.md"),

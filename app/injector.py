@@ -316,35 +316,44 @@ def canonical_v29_cats(rows: list[CatRow],
 
 
 def render_starmap_v29(*, school: str, rows: list[CatRow],
-                       photos: dict[str, bytes], map_bytes: bytes,
+                       photos: Optional[dict[str, bytes]] = None,
+                       map_bytes: bytes = b"",
                        map_key: str = "map.jpg",
-                       map_filename: str = "assets/map.jpg",
+                       photo_sizes: Optional[dict[str, int]] = None,
                        calib: Optional[dict] = None,
                        photo_loading: str = "lazy",
                        theme: Optional[Theme] = None,
                        logo_tag_html: str = "",
                        generated_on: Optional[str] = None,
                        product: Optional[str] = None,
+                       ls_prefix: Optional[str] = None,
                        version: str = "v1.1.0") -> "V29Bundle":
     """v29 全特性模板渲染（影廊/护照/分享卡/懒加载/F11 主题校徽）。
 
     返回 starmap_render.V29Bundle（html + 分片分组）；不碰文件系统。
+    map_key = 底图在 __PHOTOS 里的键，也是产物 MAP_SRC（与 16 仓库的
+    底图 basename 口径一致，同一数据包两种引擎产物可逐字节对齐）。
+    ls_prefix 缺省按校名派生（在线多项目防 localStorage 串号）；
+    与 16 仓库产物做字节对齐时由调用方显式传同一值。
     旧 render_starmap 保持原样，调用方用 engine/配置选择，默认仍走旧引擎。
     所有用户文本：CATS 经 js 转义；主题 CSS 只接受 Theme 规范化产物；
     校徽 HTML 必须来自 logo_tag() 的白名单整标签（调用方不得自行拼接）。
     """
     from . import starmap_render as sr
 
+    if not sr.MAP_NAME_RE.match(map_key or ""):
+        raise ValueError(f"底图键名不安全：{map_key!r}")
     cats, derived = canonical_v29_cats(rows, calib_override=calib)
     css = css_block(theme)
     if logo_tag_html and not logo_tag_html.lstrip().startswith('<img class="logo"'):
         raise ValueError("v29 校徽只接受 injector.logo_tag() 产出的白名单 <img>")
 
     inp = sr.V29RenderInput(
-        school=school, cats=cats, photos=dict(photos), map_bytes=map_bytes,
-        map_key=map_key, map_src=map_filename, calib=derived,
+        school=school, cats=cats, photos=dict(photos or {}),
+        photo_sizes=photo_sizes, map_bytes=map_bytes or b"",
+        map_key=map_key, calib=derived,
         photo_loading=photo_loading,
         survey_date=generated_on or date.today().strftime("%Y-%m"),
-        product=product, version=version,
+        product=product, ls_prefix=ls_prefix, version=version,
         theme_css=css, logo_intro=logo_tag_html, logo_topbar=logo_tag_html)
     return sr.render(inp)

@@ -22,13 +22,13 @@ from starlette.concurrency import run_in_threadpool
 
 from . import (census_parser, image_proc, injector, locking, merge, packager,
                phash, progress, store, summary_writer)
-from .config import (IMAGE_EXTS, LOGO_EXTS, MAX_LOGO_UPLOAD_BYTES,
+from .config import (ACTIVE_ENGINE, IMAGE_EXTS, LOGO_EXTS, MAX_LOGO_UPLOAD_BYTES,
                      MAX_PHOTOS_PER_PROJECT, MAX_PHOTOS_PER_UPLOAD, MAX_UPLOAD_BYTES,
                      ROSTER_COLUMNS, WORKSPACE, atomic_write_bytes, atomic_write_text,
                      ensure_dirs, retry_read_bytes, retry_read_text)
 from .csv_loader import build_column_map, decode_bytes, empty_template, normalize_id, parse_roster
 from .image_proc import generate_default_map
-from .injector import render_starmap
+from .injector import render_starmap, render_starmap_v29
 from .models import (CalibData, CalibPoint, CalibUpdateRequest, CreateProjectRequest,
                      GenerateRequest, MergeDecision, MergeDecisionRequest, ProjectMeta,
                      RosterPatch, RosterRowInsert, ThemeUpdateRequest, ValidationReport)
@@ -207,6 +207,8 @@ GENERATE_STAGES = 6
 def generate_bundle(pid: str, form: str = "relative", *,
                     exclude_low_confidence: bool = False,
                     school: Optional[str] = None,
+                    engine: Optional[str] = None,
+                    survey_date: Optional[str] = None,
                     rep: Optional[progress.Reporter] = None) -> dict:
     """F3+F4+F5 的核心编排：渲染 HTML → 落盘 bundle → 打 zip。
 
@@ -264,20 +266,38 @@ def generate_bundle(pid: str, form: str = "relative", *,
     atomic_write_text(dirs["root"] / "归并决策摘要.md", summary_md)
 
     stage("渲染星图 HTML 并落盘产物")
+    engine = (engine or ACTIVE_ENGINE).lower()
+    if engine not in ("v1", "v29"):
+        raise HTTPException(422, f"engine 非法：{engine!r}（v1|v29）")
+    if engine == "v29" and form != "inline":
+        # v29 的 relative 形态需要路径引导分片，F3 落地后开放
+        raise HTTPException(409, "v29 引擎暂只支持 inline 形态（relative 将随 F3 开放）")
     if form == "inline":
         # 底图也进分片（模板从 __PHOTOS["map.jpg"] 取它），所以一起参与排序和切片；
         # 真有照片叫 map.jpg 时由底图覆盖——与旧写法 payload["map.jpg"]=map_bytes 同义。
         sizes = {n: (_photo_dir(pid) / n).stat().st_size for n in found}
         sizes["map.jpg"] = len(map_bytes)
         pairs = [(n, sizes[n]) for n in sorted(sizes)]
-        html = render_starmap(school=meta.school, subtitle=meta.subtitle, rows=rows,
-                              form=form, map_filename="assets/map.jpg",
-                              photo_script_names=injector.plan_photo_chunks(pairs),
-                              calib=calib_override, map_size=map_size,
-                              theme=theme, logo_src=logo_src)
+        if engine == "v29":
+            bundle = render_starmap_v29(
+                school=meta.school, rows=rows,
+                photo_sizes={n: s for n, s in sizes.items() if n != "map.jpg"},
+                map_bytes=map_bytes, map_key="map.jpg",
+                calib=calib_override, photo_loading="lazy",
+                theme=theme, logo_tag_html=injector.logo_tag(logo_src),
+                generated_on=survey_date)
+            html, chunks = bundle.html, bundle.iter_chunks(
+                _inline_reader(pid, map_bytes))
+        else:
+            html = render_starmap(school=meta.school, subtitle=meta.subtitle, rows=rows,
+                                  form=form, map_filename="assets/map.jpg",
+                                  photo_script_names=injector.plan_photo_chunks(pairs),
+                                  calib=calib_override, map_size=map_size,
+                                  theme=theme, logo_src=logo_src)
+            chunks = injector.iter_photo_chunks(pairs, _inline_reader(pid, map_bytes))
         written = packager.build_inline_bundle(
             dest, html=html, html_name=html_name,
-            chunks=injector.iter_photo_chunks(pairs, _inline_reader(pid, map_bytes)),
+            chunks=chunks,
             roster_csv=roster_csv, report_md=md, summary_md=summary_md)
     else:
         read_photo = _photo_reader(pid)
@@ -304,7 +324,7 @@ def generate_bundle(pid: str, form: str = "relative", *,
     meta.photo_count = len(store.photo_files(pid))
     meta.has_map = True
     store.log(meta, "生成星图",
-              f"form={form} cats={len(rows)} photos={len(found)} "
+              f"form={form} engine={engine} cats={len(rows)} photos={len(found)} "
               f"exclude_low={exclude_low_confidence} "
               f"标定={calib_stat['manual']}/{calib_stat['total']} "
               f"主题={theme.preset} 校徽={'有' if logo_bytes else '无'} zip={zip_path.name}")
@@ -314,6 +334,7 @@ def generate_bundle(pid: str, form: str = "relative", *,
         "project_id": pid,
         "school": meta.school,
         "form": form,
+        "engine": engine,
         "cats": len(rows),
         "photos_embedded": len(found),
         "missing_photos": missing_photos,
@@ -625,7 +646,8 @@ def generate(pid: str, req: GenerateRequest) -> dict:
     with progress.Reporter(pid, "生成星图", total=GENERATE_STAGES) as rep:
         out = generate_bundle(pid, req.form,
                               exclude_low_confidence=req.exclude_low_confidence,
-                              school=req.school, rep=rep)
+                              school=req.school, engine=req.engine,
+                              survey_date=req.survey_date, rep=rep)
         rep.finish(f"{out['cats']} 颗星 · 内嵌 {out['photos_embedded']} 张照片 · "
                    f"zip {out['zip_bytes'] / 1024 / 1024:.1f}MB")
         return out

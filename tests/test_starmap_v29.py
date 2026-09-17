@@ -69,9 +69,11 @@ def test_eager_layout_keeps_legacy_numbering():
 
 def test_relative_layout_no_inline_chunks():
     b = _bundle(photo_loading="relative")
-    assert "photo-data-" not in b.html
+    # 懒加载器代码驻留模板（休眠），但不得有分片脚本标签与 __PM 清单
+    assert '<script src="assets/photo-data-' not in b.html
     assert "const __PM=" not in b.html
     assert b.groups == []
+    assert b.first_index == 0
 
 
 def test_chunk_text_roundtrip_keys():
@@ -89,7 +91,7 @@ def test_no_unreplaced_tokens_and_features_present():
     html = _bundle().html
     assert not re.findall(r"__[A-Z_]{3,}__", html)
     for needle in ('id="btnGallery"', 'id="passP"', 'id="soulP"',
-                   'function __ensurePhoto(', 'const MAP_SRC = "assets/map.jpg";'):
+                   'function __ensurePhoto(', 'const MAP_SRC = "map.jpg";'):
         assert needle in html, needle
     # 计数来自真实行数
     assert "已遇见 0 / 2" in html
@@ -98,10 +100,10 @@ def test_no_unreplaced_tokens_and_features_present():
 def test_canonical_cats_have_only_v29_fields():
     b = _bundle()
     m = re.search(r"const CATS = \[(.*?)\];", b.html, re.S)
-    assert m and '"id":"CAT-001"' in m.group(1)
+    assert m and 'id:"CAT-001"' in m.group(1)   # v2.7 风格：裸键 + 双引号值
     # 工厂扩展键不得泄漏进 v29 CATS
-    for forbidden in ('"starColor"', '"starRadius"', '"confidence"',
-                      '"related"', '"zone"'):
+    for forbidden in ('starColor', 'starRadius', 'confidence',
+                      'related', 'zone'):
         assert forbidden not in m.group(1), forbidden
 
 
@@ -154,10 +156,17 @@ def test_v1_v29_shared_cat_fields_identical():
     h1 = render_starmap(school="示例校", rows=rows)
 
     def cats_of(html: str) -> list[dict]:
+        """v1 产物是严格 JSON；v29 沿用 v2.7 风格（裸键 + 双引号值 +
+        去前导零数字）。剥外层中括号、补键引号、补小数前导零后统一解析。"""
         import json
         m = re.search(r"const CATS = (\[.*?\]);", html, re.S)
         assert m
-        return json.loads(m.group(1))
+        body = m.group(1).strip()
+        if body.startswith("["):
+            body = body[1:-1]
+        body = re.sub(r'([{,]\s*)([A-Za-z_]\w*)(\s*:)', r'\1"\2"\3', body)
+        body = re.sub(r':\s*\.(\d)', r': 0.\1', body)
+        return json.loads("[" + body + "]")
 
     c1, c29 = cats_of(h1), cats_of(b29.html)
     assert len(c1) == len(c29) == 2
@@ -165,6 +174,75 @@ def test_v1_v29_shared_cat_fields_identical():
               "photo", "photoCount", "brightness"}
     for a, b in zip(c1, c29):
         for k in shared:
-            assert a[k] == b[k], (k, a[k], b[k])
+            if k == "brightness":
+                assert abs(float(a[k]) - float(b[k])) < 1e-9, k
+            elif k == "photoCount":
+                assert int(a[k]) == int(b[k]), k
+            else:
+                assert a[k] == b[k], (k, a[k], b[k])
         # v29 独有的小传；v1 用 make_bio 同函数生成时也应一致
         assert "bio" in b
+
+
+# ---------- 引擎选择（API 层 e2e；默认仍 v1） ----------
+
+@pytest.fixture
+def client(tmp_workspace):
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as c:
+        yield c
+
+
+def _ready(client, two_row_csv):
+    from conftest import make_jpeg
+    r = client.post("/api/projects", json={"school": "示例校"})
+    assert r.status_code == 200, r.text
+    pid = r.json()["id"]
+    client.post(f"/api/projects/{pid}/roster",
+                files={"file": ("猫咪名册.csv", two_row_csv.encode("utf-8-sig"),
+                                "text/csv")})
+    files = [("files", (n, make_jpeg(900, 700), "image/jpeg"))
+             for n in ("demo-001.jpg", "demo-002.jpg")]
+    up = client.post(f"/api/projects/{pid}/photos", files=files)
+    assert up.json()["report"]["summary"]["ok"] is True
+    return pid
+
+
+def _html_of(client, d: dict) -> str:
+    """从 zip 产物读 HTML（e2e 惯例：/bundle 静态挂载绑定导入期 workspace，
+    tmp_workspace 下直接 GET preview_url 会 404）。"""
+    import io
+    import zipfile
+    zr = client.get(f"/api/projects/{d['project_id']}/download?form={d['form']}")
+    assert zr.status_code == 200, zr.text
+    with zipfile.ZipFile(io.BytesIO(zr.content)) as zf:
+        return zf.read(d["html_name"]).decode("utf-8")
+
+
+def test_api_engine_v29_inline(client, two_row_csv):
+    pid = _ready(client, two_row_csv)
+    g = client.post(f"/api/projects/{pid}/generate",
+                    json={"form": "inline", "engine": "v29"})
+    assert g.status_code == 200, g.text
+    d = g.json()
+    assert d["engine"] == "v29"
+    html = _html_of(client, d)
+    assert 'id="btnGallery"' in html                  # v29 全特性（影廊等）
+    assert "const __PM=" in html                     # lazy 清单
+    assert '<script src="assets/photo-data-00.js"></script>' in html
+    assert not re.findall(r"__[A-Z_]{3,}__", html)   # token 全替换
+    # 默认引擎仍是 v1：不带 engine 的请求出旧模板产物
+    g1 = client.post(f"/api/projects/{pid}/generate", json={"form": "inline"})
+    assert g1.status_code == 200, g1.text
+    assert g1.json()["engine"] == "v1"
+    assert 'id="btnGallery"' not in _html_of(client, g1.json())
+
+
+def test_api_engine_rejects_bad_and_relative_v29(client, two_row_csv):
+    pid = _ready(client, two_row_csv)
+    assert client.post(f"/api/projects/{pid}/generate",
+                       json={"form": "inline", "engine": "v8"}).status_code == 422
+    # v29 的 relative 形态随 F3 开放，此前明确拒绝
+    assert client.post(f"/api/projects/{pid}/generate",
+                       json={"form": "relative", "engine": "v29"}).status_code == 409

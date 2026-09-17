@@ -77,6 +77,8 @@ class GenerateRequest(BaseModel):
     exclude_low_confidence: bool = False
     school: Optional[str] = None
     subtitle: Optional[str] = None
+    engine: Optional[str] = None        # v1 | v29；缺省用 config.ACTIVE_ENGINE
+    survey_date: Optional[str] = None   # v29 文案用的普查年月（YYYY-MM）
 
 
 class CreateProjectRequest(BaseModel):
