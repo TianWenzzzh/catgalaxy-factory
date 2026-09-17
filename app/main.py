@@ -209,6 +209,7 @@ def generate_bundle(pid: str, form: str = "relative", *,
                     school: Optional[str] = None,
                     engine: Optional[str] = None,
                     survey_date: Optional[str] = None,
+                    photo_loading: Optional[str] = None,
                     rep: Optional[progress.Reporter] = None) -> dict:
     """F3+F4+F5 的核心编排：渲染 HTML → 落盘 bundle → 打 zip。
 
@@ -269,9 +270,10 @@ def generate_bundle(pid: str, form: str = "relative", *,
     engine = (engine or ACTIVE_ENGINE).lower()
     if engine not in ("v1", "v29"):
         raise HTTPException(422, f"engine 非法：{engine!r}（v1|v29）")
-    if engine == "v29" and form != "inline":
-        # v29 的 relative 形态需要路径引导分片，F3 落地后开放
-        raise HTTPException(409, "v29 引擎暂只支持 inline 形态（relative 将随 F3 开放）")
+    v29_loading = (photo_loading or "lazy").lower()
+    if v29_loading not in ("lazy", "eager", "relative"):
+        raise HTTPException(422,
+                            f"photo_loading 非法：{v29_loading!r}（lazy|eager|relative）")
     if form == "inline":
         # 底图也进分片（模板从 __PHOTOS["map.jpg"] 取它），所以一起参与排序和切片；
         # 真有照片叫 map.jpg 时由底图覆盖——与旧写法 payload["map.jpg"]=map_bytes 同义。
@@ -283,7 +285,7 @@ def generate_bundle(pid: str, form: str = "relative", *,
                 school=meta.school, rows=rows,
                 photo_sizes={n: s for n, s in sizes.items() if n != "map.jpg"},
                 map_bytes=map_bytes, map_key="map.jpg",
-                calib=calib_override, photo_loading="lazy",
+                calib=calib_override, photo_loading=v29_loading,
                 theme=theme, logo_tag_html=injector.logo_tag(logo_src),
                 generated_on=survey_date)
             html, chunks = bundle.html, bundle.iter_chunks(
@@ -302,11 +304,23 @@ def generate_bundle(pid: str, form: str = "relative", *,
     else:
         read_photo = _photo_reader(pid)
         names = sorted(found)          # build_relative_bundle 不再排序，顺序在这里定
-        html = render_starmap(school=meta.school, subtitle=meta.subtitle, rows=rows,
-                              form=form, map_filename="assets/map.jpg",
-                              photo_script_names=[],
-                              calib=calib_override, map_size=map_size,
-                              theme=theme, logo_src=logo_src)
+        if engine == "v29":
+            # relative：无分片，模板加载器休眠（__PHOTO_BOOT=null），
+            # PH(p) 回退返回路径本身，<img>/canvas 直接用 assets/photos/* 相对路径。
+            # 形态即加载模式，强制 relative（请求里的 photo_loading 只管 inline 分片）。
+            bundle = render_starmap_v29(
+                school=meta.school, rows=rows,
+                map_bytes=map_bytes, map_key="map.jpg",
+                calib=calib_override, photo_loading="relative",
+                theme=theme, logo_tag_html=injector.logo_tag(logo_src),
+                generated_on=survey_date)
+            html = bundle.html
+        else:
+            html = render_starmap(school=meta.school, subtitle=meta.subtitle, rows=rows,
+                                  form=form, map_filename="assets/map.jpg",
+                                  photo_script_names=[],
+                                  calib=calib_override, map_size=map_size,
+                                  theme=theme, logo_src=logo_src)
         written = packager.build_relative_bundle(dest, html=html, html_name=html_name,
                                                  photos=((n, read_photo(n)) for n in names),
                                                  map_bytes=map_bytes,
@@ -647,7 +661,8 @@ def generate(pid: str, req: GenerateRequest) -> dict:
         out = generate_bundle(pid, req.form,
                               exclude_low_confidence=req.exclude_low_confidence,
                               school=req.school, engine=req.engine,
-                              survey_date=req.survey_date, rep=rep)
+                              survey_date=req.survey_date,
+                              photo_loading=req.photo_loading, rep=rep)
         rep.finish(f"{out['cats']} 颗星 · 内嵌 {out['photos_embedded']} 张照片 · "
                    f"zip {out['zip_bytes'] / 1024 / 1024:.1f}MB")
         return out

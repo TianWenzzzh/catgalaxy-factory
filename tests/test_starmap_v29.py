@@ -76,6 +76,13 @@ def test_relative_layout_no_inline_chunks():
     assert b.first_index == 0
 
 
+def test_relative_map_src_uses_packager_path():
+    """relative 形态：无分片，MAP_SRC/横幅注记用 packager 固定落点 assets/map.jpg。"""
+    b = _bundle(photo_loading="relative")
+    assert 'const MAP_SRC = "assets/map.jpg";' in b.html
+    assert " * 底图: assets/map.jpg | 数据: CATS" in b.html
+
+
 def test_chunk_text_roundtrip_keys():
     b = _bundle(photo_loading="lazy")
     chunks = b.iter_chunks(lambda k: JPEG if k == "map.jpg" else _photos(2)[k])
@@ -239,10 +246,32 @@ def test_api_engine_v29_inline(client, two_row_csv):
     assert 'id="btnGallery"' not in _html_of(client, g1.json())
 
 
-def test_api_engine_rejects_bad_and_relative_v29(client, two_row_csv):
+def test_api_engine_rejects_bad_values(client, two_row_csv):
     pid = _ready(client, two_row_csv)
     assert client.post(f"/api/projects/{pid}/generate",
                        json={"form": "inline", "engine": "v8"}).status_code == 422
-    # v29 的 relative 形态随 F3 开放，此前明确拒绝
     assert client.post(f"/api/projects/{pid}/generate",
-                       json={"form": "relative", "engine": "v29"}).status_code == 409
+                       json={"form": "inline", "engine": "v29",
+                             "photo_loading": "instant"}).status_code == 422
+
+
+def test_api_engine_v29_relative_and_eager(client, two_row_csv):
+    """F3：v29 两形态全通。relative=无分片路径版；eager=01 起全量标签。"""
+    pid = _ready(client, two_row_csv)
+    g = client.post(f"/api/projects/{pid}/generate",
+                    json={"form": "relative", "engine": "v29"})
+    assert g.status_code == 200, g.text
+    assert g.json()["engine"] == "v29"
+    html = _html_of(client, g.json())
+    assert 'const MAP_SRC = "assets/map.jpg";' in html
+    assert "const __PM=" not in html
+    assert '<script src="assets/photo-data-' not in html
+    assert 'id="btnGallery"' in html
+
+    g2 = client.post(f"/api/projects/{pid}/generate",
+                     json={"form": "inline", "engine": "v29",
+                           "photo_loading": "eager"})
+    assert g2.status_code == 200, g2.text
+    html2 = _html_of(client, g2.json())
+    assert '<script src="assets/photo-data-01.js"></script>' in html2
+    assert "const __PM=" not in html2

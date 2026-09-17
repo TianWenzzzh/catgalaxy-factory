@@ -65,3 +65,43 @@ jobs:
           name: acceptance-evidence-${{ matrix.os }}
           path: docs/验收证据-*.md
           if-no-files-found: warn
+
+  # v29 双形态真实渲染冒烟：Chromium 只装 ubuntu（Windows 装它成本高、
+  # 收益与 test 矩阵的 Windows pytest 不重叠——施工书 F4 的取舍）。
+  # 冒烟覆盖：lazy 初始仅 00 关键片、影廊按需取片、relative 零分片、
+  # file:// 离线红线、0 pageerror。产物与断言全在临时工作区，不碰仓库外。
+  browser-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      PYTHONUTF8: 1
+      PYTHONIOENCODING: utf-8
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . playwright
+
+      - name: 安装 Chromium
+        run: python -m playwright install --with-deps chromium
+
+      - name: v29 双形态浏览器冒烟（http + file://）
+        run: python scripts/smoke_v29.py
+
+      - name: 上传冒烟截图与证据
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-v29-evidence
+          path: |
+            docs/验收证据-F3-双形态冒烟.md
+            docs/screenshots-f3/
+          if-no-files-found: warn

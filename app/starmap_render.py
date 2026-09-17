@@ -346,6 +346,14 @@ def render(inp: V29RenderInput) -> V29Bundle:
     committee = f"{school}猫咪编制委员会"
     king_name = short + "猫王"
 
+    loading = inp.photo_loading
+    if loading not in ("lazy", "eager", "relative"):
+        raise ValueError(f"非法 photo_loading：{loading!r}")
+    # MAP_SRC 口径：lazy/eager 下底图走 __PHOTOS[键]（分片 00/首片）；relative
+    # 下无分片，PH(p) 回退返回路径本身，故直接给 packager 的固定落点
+    # assets/map.jpg（build_relative_bundle 的写入位置）。
+    map_ref = inp.map_key if loading != "relative" else "assets/map.jpg"
+
     rules = json.loads(V29_RULES.read_text("utf-8"))["rules"]
 
     # 52+3 条规则的最终值（顺序/措辞与 16 仓库 build.py 的 rule_values 一致；
@@ -377,7 +385,7 @@ def render(inp: V29RenderInput) -> V29Bundle:
         "stats_foot": f"数据源：猫咪名册.csv · {html_esc(survey_date)} 实地普查 · "
                       f"仅{html_esc(short)}校园<br>"
                       f"星色 = 毛色 ｜ 环绕光点 = 收录照片数",
-        "banner_sub": f" * 底图: {inp.map_key} | 数据: CATS（{n}只真猫名册 · "
+        "banner_sub": f" * 底图: {map_ref} | 数据: CATS（{n}只真猫名册 · "
                       f"{js_str(survey_date)}普查）",
         "cats_lead_comment":
             f"// ---- 真实名册数据（build.py 自名册 CSV 注入 · "
@@ -387,7 +395,7 @@ def render(inp: V29RenderInput) -> V29Bundle:
             if inp.calib else
             "/* 星位由页面内置算法按编号稳定推导（basePos）· "
             "可在页面上手拖校准后导出坐标 */",
-        "map_src": f'const MAP_SRC = "{js_str(inp.map_key)}";',
+        "map_src": f'const MAP_SRC = "{js_str(map_ref)}";',
         "ls_key": f'const LS_KEY  = "{js_str(ls_prefix)}-cat-galaxy-positions";',
         "js_title": f'const TITLE="{js_str(product)}";',
         "ls_fx": f'"{js_str(ls_prefix)}-cat-fx"',
@@ -450,7 +458,6 @@ def render(inp: V29RenderInput) -> V29Bundle:
     # 分片分组与引导串（照片尺寸可由调用方直给，免整册读进内存）
     photo_sizes = (dict(inp.photo_sizes) if inp.photo_sizes is not None
                    else {k: len(v) for k, v in inp.photos.items()})
-    loading = inp.photo_loading
     if loading == "lazy":
         groups = [[inp.map_key]] + chunk_plan(
             [(k, n) for k, n in photo_sizes.items() if k != inp.map_key])

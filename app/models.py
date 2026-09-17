@@ -79,6 +79,7 @@ class GenerateRequest(BaseModel):
     subtitle: Optional[str] = None
     engine: Optional[str] = None        # v1 | v29；缺省用 config.ACTIVE_ENGINE
     survey_date: Optional[str] = None   # v29 文案用的普查年月（YYYY-MM）
+    photo_loading: Optional[str] = None  # v29 专用：lazy | eager | relative；缺省 lazy
 
 
 class CreateProjectRequest(BaseModel):

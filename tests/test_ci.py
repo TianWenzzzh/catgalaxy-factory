@@ -64,6 +64,25 @@ def test_windows_is_in_the_matrix(wf):
     assert any("windows" in o for o in oses), f"矩阵里没有 Windows：{oses}"
 
 
+# ---------- v29（T6 F4）：工作流必须带上 v29 冒烟，防后人摘步骤 ----------
+
+def test_v29_suite_and_smoke_script_exist():
+    """v29 单测与双形态冒烟脚本是 F2/F3 的出门证据，谁删谁就要给出替代。"""
+    assert (ROOT / "tests" / "test_starmap_v29.py").exists(), "v29 单测套件被删"
+    assert (ROOT / "scripts" / "smoke_v29.py").exists(), "双形态冒烟脚本被删"
+
+
+def test_ci_has_linux_browser_smoke_job(wf):
+    """真实渲染冒烟只上 ubuntu（Chromium 在 Windows runner 上成本高），但必须在。"""
+    jobs = wf["jobs"]
+    assert "browser-smoke" in jobs, "CI 缺 browser-smoke job（v29 双形态冒烟）"
+    job = jobs["browser-smoke"]
+    assert job["runs-on"] == "ubuntu-latest"
+    cmds = "\n".join(s.get("run", "") for s in job["steps"])
+    assert "smoke_v29.py" in cmds, "browser-smoke 没跑 scripts/smoke_v29.py"
+    assert "playwright install" in cmds, "browser-smoke 没装 Chromium"
+
+
 def test_ci_forces_utf8_io(wf):
     """Windows runner 默认 GBK 控制台，验收脚本满屏中文会 UnicodeEncodeError。"""
     env = wf["jobs"]["test"].get("env", {})
