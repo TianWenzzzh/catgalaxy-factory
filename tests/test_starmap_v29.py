@@ -85,7 +85,7 @@ def test_relative_map_src_uses_packager_path():
 
 def test_chunk_text_roundtrip_keys():
     b = _bundle(photo_loading="lazy")
-    chunks = b.iter_chunks(lambda k: JPEG if k == "map.jpg" else _photos(2)[k])
+    chunks = list(b.iter_chunks(lambda k: JPEG if k == "map.jpg" else _photos(2)[k]))
     names = [n for n, _ in chunks]
     assert names == ["photo-data-00.js", "photo-data-01.js"]
     assert "__PHOTOS[\"map.jpg\"]" in chunks[0][1]
@@ -239,11 +239,17 @@ def test_api_engine_v29_inline(client, two_row_csv):
     assert "const __PM=" in html                     # lazy 清单
     assert '<script src="assets/photo-data-00.js"></script>' in html
     assert not re.findall(r"__[A-Z_]{3,}__", html)   # token 全替换
-    # 默认引擎仍是 v1：不带 engine 的请求出旧模板产物
+    # F5 起出厂默认引擎 = v29：不带 engine 的请求也出全特性产物
     g1 = client.post(f"/api/projects/{pid}/generate", json={"form": "inline"})
     assert g1.status_code == 200, g1.text
-    assert g1.json()["engine"] == "v1"
-    assert 'id="btnGallery"' not in _html_of(client, g1.json())
+    assert g1.json()["engine"] == "v29"
+    assert 'id="btnGallery"' in _html_of(client, g1.json())
+    # v1 引擎保留 deprecated 出口，显式指定仍走旧 717 模板
+    g2 = client.post(f"/api/projects/{pid}/generate",
+                     json={"form": "inline", "engine": "v1"})
+    assert g2.status_code == 200, g2.text
+    assert g2.json()["engine"] == "v1"
+    assert 'id="btnGallery"' not in _html_of(client, g2.json())
 
 
 def test_api_engine_rejects_bad_values(client, two_row_csv):

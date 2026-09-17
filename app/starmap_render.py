@@ -280,6 +280,16 @@ class V29RenderInput:
     theme_css: str = ""
     logo_intro: str = ""
     logo_topbar: str = ""
+    # ---- 人工文案/节奏覆盖（schools/nuc 的 build_meta 逐项对应；缺省走推导） ----
+    milestones: Optional[list] = None
+    pass_titles: Optional[list] = None
+    king_name: Optional[str] = None
+    poster_title: Optional[str] = None
+    poster_file: Optional[str] = None
+    export_map_name: Optional[str] = None
+    skill_foot_line: Optional[str] = None
+    soul_line: Optional[str] = None
+    calib_note: Optional[str] = None
     # ---- 可选富数据（工厂一般不用，给 05 全量再基线留口） ----
     areas: Optional[list[dict]] = None
     area_keys: Optional[list] = None
@@ -295,13 +305,15 @@ class V29Bundle:
     first_index: int                     # 分片起始编号（lazy=0，eager=1）
     key_chunk: dict[str, int]
 
-    def iter_chunks(self, read) -> list[tuple[str, str]]:
-        """read(basename)->bytes；产出 (photo-data-NN.js 文件名, JS 文本)。"""
-        out = []
+    def iter_chunks(self, read):
+        """read(basename)->bytes；逐片**产出** (photo-data-NN.js 文件名, JS 文本)。
+
+        生成器：与 build_inline_bundle 的流式契约对齐——用到哪片才读哪片，
+        峰值内存 = 1 片 + 1 图。调用方要列表就自己 list() 包一层。
+        """
         for i, group in enumerate(self.groups, start=self.first_index):
-            out.append((f"photo-data-{i:02d}.js",
-                        chunk_text([_photo_line(k, read(k)) for k in group])))
-        return out
+            yield (f"photo-data-{i:02d}.js",
+                   chunk_text([_photo_line(k, read(k)) for k in group]))
 
 
 # ───────────────────────── 主渲染 ─────────────────────────
@@ -339,12 +351,18 @@ def render(inp: V29RenderInput) -> V29Bundle:
     stars = (inp.poster_stars if inp.poster_stars is not None
              else derive_poster_stars(inp.cats))
 
-    ms = milestones_for(n)
-    pass_titles = pass_titles_for(ms)
+    ms = list(inp.milestones) if inp.milestones else milestones_for(n)
+    pass_titles = (list(inp.pass_titles) if inp.pass_titles
+                   else pass_titles_for(ms))
     js_titles = "[" + ",".join(f'[{int(t)},"{js_str(nm)}"]'
                                for t, nm in pass_titles) + "]"
     committee = f"{school}猫咪编制委员会"
-    king_name = short + "猫王"
+    king_name = inp.king_name or (short + "猫王")
+    poster_title_v = inp.poster_title or f"{short}寻猫地图"
+    poster_file_v = inp.poster_file or f"{short}寻猫海报.png"
+    export_map_name_v = inp.export_map_name or f"{school}校园图"
+    skill_foot_v = inp.skill_foot_line or f"{school}—校园猫咪档案 · {tagline}"
+    soul_line_v = inp.soul_line or f"和它一样：真实、在编、被记录在册的{short}猫"
 
     loading = inp.photo_loading
     if loading not in ("lazy", "eager", "relative"):
@@ -391,10 +409,11 @@ def render(inp: V29RenderInput) -> V29Bundle:
             f"// ---- 真实名册数据（build.py 自名册 CSV 注入 · "
             f"{n} 只在编 · {survey_date} 普查）----",
         "calib_lead_comment":
-            "/* 人工固化校准坐标 · 手动校准 localStorage 仍优先覆盖 */"
-            if inp.calib else
-            "/* 星位由页面内置算法按编号稳定推导（basePos）· "
-            "可在页面上手拖校准后导出坐标 */",
+            f"/* {inp.calib_note} */" if inp.calib_note else
+            ("/* 人工固化校准坐标 · 手动校准 localStorage 仍优先覆盖 */"
+             if inp.calib else
+             "/* 星位由页面内置算法按编号稳定推导（basePos）· "
+             "可在页面上手拖校准后导出坐标 */"),
         "map_src": f'const MAP_SRC = "{js_str(map_ref)}";',
         "ls_key": f'const LS_KEY  = "{js_str(ls_prefix)}-cat-galaxy-positions";',
         "js_title": f'const TITLE="{js_str(product)}";',
@@ -404,25 +423,24 @@ def render(inp: V29RenderInput) -> V29Bundle:
         "card_title_expr": f'c.id+" ｜ {js_str(committee)} · 登记在册"',
         "card_meta_expr":
             f'"{js_str(survey_date)} 实地普查 · 第 "+(+c.id.slice(4))+" 号星"',
-        "export_map_name": f'map:"{js_str(school)}校园图"',
+        "export_map_name": f'map:"{js_str(export_map_name_v)}"',
         "milestones": "[" + ",".join(str(int(x)) for x in ms) + "]",
         "pass_titles": js_titles,
         "milestone_toast":
             f'm==={n}?"🏆 喵图鉴全收集！你就是{js_str(king_name)}！"',
         "clear_filter": f'cb.textContent="清筛选 · 看全部{n}只"',
-        "poster_title": f'g.fillText("{js_str(short)}寻猫地图",pw/2,118)',
+        "poster_title": f'g.fillText("{js_str(poster_title_v)}",pw/2,118)',
         "poster_sub":
             f'"跟着星图走遍它们的地盘 · "+CATS.length+" 只在编基米 · '
             f'{js_str(survey_date)} 实地普查"',
         "poster_open_hint":
             f"打开「{html_esc(product)}」点击任意星星，"
             f"即可查看它的档案与出没星域",
-        "skill_foot_line":
-            f"{html_esc(school)}—校园猫咪档案 · {html_esc(tagline)}",
-        "poster_file": f'a.download="{js_str(short)}寻猫海报.png"',
+        "skill_foot_line": html_esc(skill_foot_v),
+        "poster_file": f'a.download="{js_str(poster_file_v)}"',
         "rec_badge":
             f'" ｜ 图鉴 "+SEEN.size+"/"+CATS.length+" ｜ {js_str(product)}"',
-        "soul_line": f"和它一样：真实、在编、被记录在册的{html_esc(short)}猫",
+        "soul_line": html_esc(soul_line_v),
         "soul_meta":
             f'"{n}只在编基米 · {js_str(survey_date)}实地普查 · 图鉴 "'
             f'+SEEN.size+"/"+CATS.length',

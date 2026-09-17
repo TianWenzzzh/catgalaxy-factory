@@ -257,7 +257,8 @@ def test_generate_bakes_manual_calib_into_html(project, tmp_workspace):
     client.put(f"/api/projects/{project}/calib",
                json={"positions": {"CAT-001": {"x": 0.147, "y": 0.258}},
                      "note": "实地蹲点标定"})
-    r = client.post(f"/api/projects/{project}/generate", json={"form": "relative"})
+    r = client.post(f"/api/projects/{project}/generate",
+                    json={"form": "relative", "engine": "v1"})  # v1 专属格式契约
     assert r.status_code == 200, r.text
     j = r.json()
     assert j["calib"] == {"manual": 1, "derived": 1, "total": 2, "missing": []}
@@ -280,7 +281,9 @@ def test_generate_injects_real_map_size(project, tmp_workspace):
                     files={"file": ("map.jpg", buf.getvalue(), "image/jpeg")})
     assert r.status_code == 200 and r.json()["size"] == [1000, 400]
 
-    j = client.post(f"/api/projects/{project}/generate", json={"form": "relative"}).json()
+    j = client.post(f"/api/projects/{project}/generate",
+                    json={"form": "relative",
+                          "engine": "v1"}).json()  # MW/MH 注入是 v1 模板契约
     assert j["map_size"] == [1000, 400]
     html = next((tmp_workspace / project / "out" / "relative").glob("*.html")) \
         .read_text(encoding="utf-8")
@@ -302,7 +305,9 @@ def test_calib_survives_regeneration_across_forms(project, tmp_workspace):
     client.put(f"/api/projects/{project}/calib",
                json={"positions": {"CAT-002": {"x": 0.9, "y": 0.1}}})
     for form in ("relative", "inline"):
-        r = client.post(f"/api/projects/{project}/generate", json={"form": form})
+        # v1 模板的 CALIB 注入格式契约（v29 由 test_starmap_v29 + 比对脚本守护）
+        r = client.post(f"/api/projects/{project}/generate",
+                        json={"form": form, "engine": "v1"})
         assert r.status_code == 200, r.text
         assert r.json()["calib"]["manual"] == 1
         html = next((tmp_workspace / project / "out" / form).glob("*.html")) \

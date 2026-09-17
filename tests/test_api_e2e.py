@@ -1,6 +1,7 @@
 """F1-F5 全链路端到端单测（含验收场景 1：空模板 + 2 行示例数据）。"""
 import io
 import json
+import re
 import zipfile
 
 import pytest
@@ -232,8 +233,16 @@ def test_generate_inline_full_flow(client, two_row_csv):
     assert '"map.jpg"' in joined            # 底图也内嵌，双击即开
 
     html = zf.read("内嵌校喵星图.html").decode("utf-8")
-    for cn in chunk_names:
-        assert f'<script src="{cn}"></script>' in html
+    pm = re.search(r"const __PM=(\{.*?\});</script>", html)
+    if pm:  # v29 lazy：HTML 只引 00 关键片，其余分片由 __PM 清单接管
+        manifest = json.loads(pm.group(1))
+        assert '<script src="assets/photo-data-00.js"></script>' in html
+        claimed = {f"assets/photo-data-{int(i):02d}.js"
+                   for i in manifest["m"].values()}
+        assert claimed == set(chunk_names)
+    else:   # v1 eager：HTML 逐片全引
+        for cn in chunk_names:
+            assert f'<script src="{cn}"></script>' in html
 
 
 def test_inline_bundle_is_self_contained(client, two_row_csv):
@@ -417,20 +426,29 @@ def test_full_76_regression(client):
         assert f"assets/photos/{n}" in names_in_zip, f"照片 {n} 未进包"
 
     html = zf.read("中北大学喵星图.html").decode("utf-8")
-    import re as _re
-    m = _re.search(r"const CATS = (\[.*?\]);\nconst CALIB", html, _re.S)
+    # v1 是严格 JSON 且后随 const CALIB；v29 是 v2.7 风格裸键数组，统一容错解析
+    m = re.search(r"const CATS = (\[.*?\]);", html, re.S)
     assert m
-    cats = json.loads(m.group(1).replace("<\\/", "</"))
+    body = m.group(1).strip()
+    if body.startswith("["):
+        body = body[1:-1]
+    body = re.sub(r"([{,]\s*)([A-Za-z_]\w*)(\s*:)", r'\1"\2"\3', body)
+    body = re.sub(r":\s*\.(\d)", r": 0.\1", body)
+    cats = json.loads("[" + body + "]")
     assert len(cats) == 76
     assert len({c["id"] for c in cats}) == 76
     assert all(c["photo"].startswith("assets/photos/") for c in cats)
     assert all(c["photo"].count("/") == 2 for c in cats), "photo 路径残留目录前缀，离线会死链"
-    assert all(0.5 <= c["brightness"] <= 1.05 for c in cats)
-    assert all(c["starColor"] for c in cats)
+    assert all(0.5 <= float(c["brightness"]) <= 1.05 for c in cats)
+    if "starColor" in cats[0]:      # v1 专属字段；v29 的星色由前端毛色分组推导
+        assert all(c["starColor"] for c in cats)
     assert all(c["bio"] for c in cats)
 
-    mc = _re.search(r"const CALIB = (\{.*?\});\nconst MAP_SRC", html, _re.S)
-    calib = json.loads(mc.group(1))
+    mc = re.search(r"const CALIB\s*=\s*\{(.*?)\};", html, re.S)
+    assert mc
+    pairs = re.findall(r'"(CAT-\d+)":\{x:([\d.]+),y:([\d.]+)\}', mc.group(1))
+    calib = ({cid: {"x": float(x), "y": float(y)} for cid, x, y in pairs}
+             if pairs else json.loads("{" + mc.group(1) + "}"))
     assert len(calib) == 76
     assert set(calib) == {c["id"] for c in cats}
 

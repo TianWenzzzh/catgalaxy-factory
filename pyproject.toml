@@ -1,6 +1,6 @@
 [project]
 name = "catgalaxy-factory"
-version = "1.0.0"
+version = "1.1.0"
 description = "喵星图工厂 · 校园猫咪星图批量生成工具"
 requires-python = ">=3.10"
 dependencies = [

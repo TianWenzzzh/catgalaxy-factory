@@ -584,7 +584,8 @@ def test_generate_relative_bakes_theme_and_writes_the_badge(project, tmp_workspa
     client.post(f"/api/projects/{project}/logo",
                 files={"file": ("badge.png", _png((60, 60)), "image/png")})
 
-    g = client.post(f"/api/projects/{project}/generate", json={"form": "relative"})
+    g = client.post(f"/api/projects/{project}/generate",
+                    json={"form": "relative", "engine": "v1"})  # v1 主题 token 契约
     assert g.status_code == 200, g.text
     d = g.json()
     assert d["theme"]["preset"] == "dawn"
@@ -619,7 +620,8 @@ def test_generate_inline_embeds_the_badge_as_a_data_uri(project, tmp_workspace):
 def test_generate_without_theme_is_byte_identical_to_the_old_output(project, tmp_workspace):
     """没配主题的项目，产物不该因为上了这个功能而变化。"""
     before = client.post(f"/api/projects/{project}/generate",
-                         json={"form": "relative"}).json()
+                         json={"form": "relative",
+                               "engine": "v1"}).json()  # v1 无主题零注入契约
     html = _artifact_html(tmp_workspace, project, "relative")
     assert INJECTED_CSS not in html, "没配主题却多注入了一段 CSS"
     assert '<img class="logo"' not in html
@@ -631,11 +633,13 @@ def test_generate_without_theme_is_byte_identical_to_the_old_output(project, tmp
 
 def test_theme_change_is_picked_up_by_the_next_generation(project, tmp_workspace):
     """改了主题必须重新生成——但重新生成之后一定得生效，不然控制台就是在骗人。"""
-    client.post(f"/api/projects/{project}/generate", json={"form": "relative"})
+    client.post(f"/api/projects/{project}/generate",
+                json={"form": "relative", "engine": "v1"})
     assert "--bg:#070c1c" in _artifact_html(tmp_workspace, project, "relative")
 
     client.put(f"/api/projects/{project}/theme", json={"preset": "sakura"})
-    client.post(f"/api/projects/{project}/generate", json={"form": "relative"})
+    client.post(f"/api/projects/{project}/generate",
+                json={"form": "relative", "engine": "v1"})
     html = _artifact_html(tmp_workspace, project, "relative")
     assert "--bg:#160a14" in html
     assert "夜樱粉" not in html        # 预设的中文名是控制台文案，不该进产物

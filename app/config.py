@@ -27,10 +27,10 @@ DEFAULT_MAP_W = 1920                  # 底图逻辑尺寸兜底值（无真实�
 DEFAULT_MAP_H = 1239
 PHOTO_CHUNK_BYTES = 1_500_000  # base64 分片大小（inline 形态）
 
-# 渲染引擎（T6 收敛）：v1=旧 717 行模板（缺省），v29=v29 全特性+懒加载。
-# 服务端缺省走环境变量 STARMAP_ENGINE；单次生成可用 GenerateRequest.engine
-# 覆盖。切换默认前 full76 满血验收必须先过（施工书 F5）。
-ACTIVE_ENGINE = os.environ.get("STARMAP_ENGINE", "v1").strip().lower()
+# 渲染引擎（T6 收敛）：v29=v29 全特性+懒加载（F5 起为缺省），v1=旧 717 行
+# 模板（deprecated，保留一个版本周期后移除）。服务端缺省走环境变量
+# STARMAP_ENGINE；单次生成可用 GenerateRequest.engine 覆盖。
+ACTIVE_ENGINE = os.environ.get("STARMAP_ENGINE", "v29").strip().lower()
 
 # 上传解包预算。zip 表头里的 file_size 由上传者填写、不可信，
 # 所有限额都在流式解压时实时累加判定，超了就停手，不做「先解压完再说」。

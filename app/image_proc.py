@@ -27,6 +27,43 @@ def safe_filename(name: str, fallback: str = "photo.jpg") -> str:
     return base or fallback
 
 
+def prepare_package_jpeg(data: bytes, max_side: int, max_bytes: int | None,
+                         is_jpeg: bool = True) -> tuple[bytes, bool]:
+    """数据包保真压缩（T6 F6：与 meow-starmap tools/build.py prepare_jpeg 同策略）。
+
+    与上传管线的 compress_photo（全量重编码）不同：合格 JPEG 原字节直通，
+    只在长边超限/非 JPEG/EXIF 需矫正时重编码——这是 v2.7 实测产物的口径，
+    05/16 托管产物与工厂引擎做字节级对齐时走这里。返回 (bytes, 是否重编码)。
+    """
+    from PIL import ImageOps
+
+    img = Image.open(io.BytesIO(data))
+    fixed = ImageOps.exif_transpose(img)
+    w0, h0 = img.size
+    w, h = fixed.size
+    rotated = (w, h) != (w0, h0)
+    long_side = max(w, h)
+    if not rotated and long_side <= max_side and is_jpeg:
+        return data, False
+    if long_side > max_side:
+        scale = max_side / float(long_side)
+        fixed = fixed.resize((max(1, int(w * scale)), max(1, int(h * scale))),
+                             Image.LANCZOS)
+    fixed = fixed.convert("RGB")
+    if max_bytes is not None:
+        out, _q = _fit_bytes(fixed, max_bytes)
+        if out is None:
+            buf = io.BytesIO()
+            fixed.save(buf, "JPEG", quality=30, optimize=True,
+                       progressive=True)
+            out = buf.getvalue()
+    else:
+        buf = io.BytesIO()
+        fixed.save(buf, "JPEG", quality=86, optimize=True, progressive=True)
+        out = buf.getvalue()
+    return out, True
+
+
 def _open_rgb(data: bytes) -> Image.Image:
     img = Image.open(io.BytesIO(data))
     if img.mode in ("RGBA", "LA", "P"):

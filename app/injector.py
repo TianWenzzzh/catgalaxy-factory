@@ -233,6 +233,9 @@ def render_starmap(*, school: str, subtitle: str = "", rows: list[CatRow],
                    logo_src: str = "") -> str:
     """渲染最终 HTML 字符串。
 
+    .. deprecated:: T6 F5 起 v1 引擎（717 行模板）让位 v29 全特性引擎，
+        保留一个版本周期（--engine v1 出口仍在），此后移除。
+
     每个 token 都按它落地的上下文转义——HTML 文本、JS 字符串、JS 注释是三套
     不同的规则，混用就会漏（校名里的 `</script>` 在 HTML 里无害，在 JS 里能
     把整个脚本块收掉）。

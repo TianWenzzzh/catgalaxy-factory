@@ -37,8 +37,9 @@ PHOTO_DIRS = [E_ROOT / "08_原始照片视频" / "照片视频",
               E_ROOT / "08_原始照片视频" / "补充视频照片"]
 DOCS = ROOT / "docs"
 
-# 渲染引擎：--engine 选择（v1|v29），透传进每次 generate 请求（施工书 F5）
-ENGINE = "v1"
+# 渲染引擎：--engine 选择；None = 跟随应用缺省（config.ACTIVE_ENGINE），
+# CI 的 demo2 由此始终压在「出厂默认引擎」上（施工书 F5 切默认后即 v29）
+ENGINE = None
 
 
 class Evidence:
@@ -78,11 +79,19 @@ class Evidence:
 
 
 def cats_from_html(html: str) -> list[dict]:
-    """从生成的星图 HTML 里反解 CATS 数组——验证产物本身，而不是验证代码。"""
-    m = re.search(r"const CATS = (\[.*?\]);\s*\nconst CALIB", html, re.S)
+    """从生成的星图 HTML 里反解 CATS 数组——验证产物本身，而不是验证代码。
+
+    v1 产物是严格 JSON；v29 沿用 v2.7 风格（裸键 + 双引号值 + 去前导零数字）。
+    剥外层中括号、补键引号、补小数前导零后统一按 JSON 解析。"""
+    m = re.search(r"const CATS = (\[.*?\]);", html, re.S)
     if not m:
         raise AssertionError("生成的 HTML 里找不到 CATS 数组")
-    return json.loads(m.group(1))
+    body = m.group(1).strip()
+    if body.startswith("["):
+        body = body[1:-1]
+    body = re.sub(r"([{,]\s*)([A-Za-z_]\w*)(\s*:)", r'\1"\2"\3', body)
+    body = re.sub(r":\s*\.(\d)", r": 0.\1", body)
+    return json.loads("[" + body + "]")
 
 
 def make_photo(width: int, height: int, seed: int) -> bytes:
@@ -758,8 +767,9 @@ def main() -> int:
     _utf8_stdio()
     ap = argparse.ArgumentParser(description="喵星图工厂验收脚本")
     ap.add_argument("--case", choices=("demo2", "full76", "all"), default="all")
-    ap.add_argument("--engine", choices=("v1", "v29"), default="v1",
-                    help="渲染引擎：v1=旧模板（缺省），v29=v29 全特性+懒加载")
+    ap.add_argument("--engine", choices=("v1", "v29"), default=None,
+                    help="渲染引擎：缺省跟随应用默认（当前 v29）；"
+                         "显式 v1 走旧 717 模板（deprecated）")
     args = ap.parse_args()
     ENGINE = args.engine
 

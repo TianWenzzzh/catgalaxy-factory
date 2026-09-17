@@ -235,7 +235,16 @@ def test_every_script_tag_in_the_inline_html_has_a_matching_chunk_file(client):
     tags = re.findall(r'<script src="assets/(photo-data-\d{2}\.js)"></script>', html)
     on_disk = sorted(p.name for p in (dest / "assets").glob("photo-data-*.js"))
     assert len(on_disk) >= 2, f"20 张 1200px 照片只分了 {len(on_disk)} 片，用例失去意义"
-    assert tags == on_disk
+    pm = re.search(r"const __PM=(\{.*?\});</script>", html)
+    if pm:  # v29 lazy：HTML 只引 00 关键片，其余分片由 __PM 清单接管
+        import json
+        manifest = json.loads(pm.group(1))
+        claimed = sorted({f"photo-data-{int(i):02d}.js"
+                          for i in manifest["m"].values()})
+        assert tags == ["photo-data-00.js"], tags
+        assert claimed == on_disk, (claimed, on_disk)
+    else:   # v1 eager：HTML 逐片全引
+        assert tags == on_disk
 
     joined = "".join((dest / "assets" / n).read_text(encoding="utf-8") for n in on_disk)
     for n in names:
