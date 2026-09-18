@@ -403,7 +403,8 @@ def render(inp: V29RenderInput) -> V29Bundle:
                           f"《归并决策摘要.md》，欢迎抽查。",
         "stats_foot": f"数据源：猫咪名册.csv · {html_esc(survey_date)} 实地普查 · "
                       f"仅{html_esc(short)}校园<br>"
-                      f"星色 = 毛色 ｜ 环绕光点 = 收录照片数"
+                      f"星色 = 毛色 ｜ 环绕光点 = 收录照片数<br>"
+                      f"代码 MIT · 数据与照片 CC BY-NC-SA 4.0 · 转载请署名并附仓库链接"
                       + (f"<br>✍ {html_esc(inp.footer_signature)}"
                          if inp.footer_signature else ""),
         "banner_sub": f" * 底图: {map_ref} | 数据: CATS（{n}只真猫名册 · "
