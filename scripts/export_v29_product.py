@@ -58,6 +58,7 @@ def build_bundle():
         skill_foot_line=meta["skill_foot_line"], soul_line=meta["soul_line"],
         calib_note=meta.get("calib_note"),        # v34 起 nuc 不带该键
         star_box=meta.get("star_box"),            # v34：建成区框随 build_meta 下发
+        star_zone=meta.get("star_zone"),          # v35：多边形撒点区随 build_meta 下发
         areas=json.loads((PKG / "data" / "areas.json").read_text("utf-8")),
         area_keys=json.loads((PKG / "data" / "area_keys.json").read_text("utf-8")),
         rel=json.loads((PKG / "data" / "relations.json").read_text("utf-8")),
