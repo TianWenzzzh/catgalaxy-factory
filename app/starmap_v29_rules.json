@@ -329,6 +329,12 @@
       "old": "<div class=\"brand\">",
       "new": "<div class=\"brand\">__LOGO_TOPBAR__",
       "count": 1
+    },
+    {
+      "name": "star_box",
+      "old": "const STAR_BOX={x0:.07,y0:.09,w:.86,h:.82};",
+      "new": "__STAR_BOX__",
+      "count": 1
     }
   ]
 }

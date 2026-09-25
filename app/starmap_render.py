@@ -125,6 +125,18 @@ def render_calib(calib: dict) -> str:
     return "\n".join(lines)
 
 
+def render_star_box(box: Optional[dict]) -> str:
+    """STAR_BOX 的 JS 字面量。缺省值必须逐字节等于 v33 模板里写死的四个常量。"""
+    b = {**{"x0": .07, "y0": .09, "w": .86, "h": .82}, **(box or {})}
+    for k, v in b.items():
+        if not (isinstance(v, (int, float)) and 0.0 <= float(v) <= 1.0):
+            raise ValueError(f"star_box.{k} 非法：{v!r}（要 0..1 的数）")
+    if b["w"] <= 0 or b["h"] <= 0 or b["x0"] + b["w"] > 1 or b["y0"] + b["h"] > 1:
+        raise ValueError(f"star_box 越界：{b}（x0+w 与 y0+h 不得超过 1）")
+    return "const STAR_BOX={" + ",".join(f"{k}:{js_num3(b[k])}"
+                                         for k in ("x0", "y0", "w", "h")) + "};"
+
+
 def render_areas(areas: list[dict]) -> str:
     if not areas:
         return "const AREAS=[];"
@@ -290,6 +302,7 @@ class V29RenderInput:
     skill_foot_line: Optional[str] = None
     soul_line: Optional[str] = None
     calib_note: Optional[str] = None
+    star_box: Optional[dict] = None      # {x0,y0,w,h}；缺省=整幅画（与 v33 逐字节一致）
     footer_signature: str = ""           # 工厂主题落款（追加在页脚，转义后输出）
     # ---- 可选富数据（工厂一般不用，给 05 全量再基线留口） ----
     areas: Optional[list[dict]] = None
@@ -470,6 +483,7 @@ def render(inp: V29RenderInput) -> V29Bundle:
         # ---- JS 数据块（规则表前 7 条）----
         "cats_block": render_cats(inp.cats),
         "calib_block": render_calib(inp.calib),
+        "star_box": render_star_box(inp.star_box),
         "areas_block": render_areas(areas),
         "area_keys_block": render_area_keys(area_keys),
         "rel_block": render_rel(rel),
