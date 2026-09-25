@@ -56,7 +56,8 @@ def build_bundle():
         king_name=meta["king_name"], poster_title=meta["poster_title"],
         poster_file=meta["poster_file"], export_map_name=meta["export_map_name"],
         skill_foot_line=meta["skill_foot_line"], soul_line=meta["soul_line"],
-        calib_note=meta["calib_note"],
+        calib_note=meta.get("calib_note"),        # v34 起 nuc 不带该键
+        star_box=meta.get("star_box"),            # v34：建成区框随 build_meta 下发
         areas=json.loads((PKG / "data" / "areas.json").read_text("utf-8")),
         area_keys=json.loads((PKG / "data" / "area_keys.json").read_text("utf-8")),
         rel=json.loads((PKG / "data" / "relations.json").read_text("utf-8")),
